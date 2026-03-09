@@ -97,17 +97,55 @@ function scanAllTabs() {
   };
 
   let stopErrors = [];
+  
   tabsToScan.forEach(tabName => {
     let sheet = ss.getSheetByName(tabName);
     if (!sheet) return;
+    
     let missing = [];
     const req = requirements[tabName];
-    // Check Cells
-    req.config.forEach(c => { if(sheet.getRange(c).getValue() === "") missing.push(`Cell ${c}`); });
-    // Check Cols (Checking first data row)
-    req.cols.forEach(col => { if(sheet.getRange(col + CONFIG.dataStartRow).getValue() === "") missing.push(`Col ${col}`); });
     
-    if (missing.length > 0) stopErrors.push(`[${tabName}]: ${missing.join(", ")}`);
+    // Set boundaries for our rows based on your CONFIG and the sheet's current size
+    const startRow = CONFIG.dataStartRow;
+    const lastRow = Math.max(startRow, sheet.getLastRow()); 
+    
+    // Get all values for Column E to efficiently see which rows are populated
+    // (Start row, column 5=E, number of rows down, 1 column wide)
+    const colEData = sheet.getRange(startRow, 5, lastRow - startRow + 1, 1).getValues();
+    
+    let configsChecked = false; // Flag to ensure we don't redundantly check static config cells
+
+    // Loop through every single row
+    colEData.forEach((row, idx) => {
+      let colEValue = row[0];
+      let actualRow = startRow + idx;
+      
+      // ONLY trigger the requirement check if Column E HAS A VALUE
+      if (colEValue !== "") {
+        
+        // 1. Check Configuration cells (We only need to alert about these once per sheet)
+        if (!configsChecked) {
+          req.config.forEach(c => { 
+            if(sheet.getRange(c).getValue() === "") missing.push(`Cell ${c}`); 
+          });
+          configsChecked = true;
+        }
+        
+        // 2. Check the specific column requirements for this exact row
+        req.cols.forEach(col => { 
+          // Reads: (e.g.) sheet.getRange("L" + 10).getValue()
+          if(sheet.getRange(col + actualRow).getValue() === "") {
+            // Log as L10, P12, etc., so the user knows exactly which row failed
+            missing.push(`${col}${actualRow}`); 
+          } 
+        });
+      }
+    });
+    
+    // Group and add error alerts per tab if anything was found
+    if (missing.length > 0) {
+      stopErrors.push(`[${tabName}]: ${missing.join(", ")}`);
+    }
   });
 
   if (stopErrors.length > 0) {
@@ -179,30 +217,64 @@ function colToIdx(letter) {
 ================================= */
 function fetchDataOnly(tabName) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ui = SpreadsheetApp.getUi();
+  
+  // ==========================================
+  // 1. DATABASE VALIDATION (Check REF #)
+  // ==========================================
+  const masterDbId = "1hMMUd4ho50HP63dc2fRAo--iK-m7YotamkKtsDGT_Us"; 
+  const props = PropertiesService.getScriptProperties();
+  const activeDB_ID = props.getProperty("ACTIVE_DB_ID") || masterDbId;
+
+  const instructionSheet = ss.getSheetByName("Instructions");
+  if (!instructionSheet) {
+    ui.alert("❌ ERROR: 'Instructions' tab not found.");
+    return;
+  }
+
+  const currentRef = instructionSheet.getRange("C7").getValue().toString().trim();
+  
+  if (currentRef === "") {
+    ui.alert("❌ ERROR: Cell C7 in 'Instructions' tab is empty. Please enter a Reference Number first.");
+    return;
+  }
+
+  try {
+    const dbSs = SpreadsheetApp.openById(activeDB_ID);
+    const subTab = dbSs.getSheetByName("PBTT Submission");
+    
+    if (subTab) {
+      const lastDbRow = subTab.getLastRow();
+      if (lastDbRow > 1) {
+        const recordedRefs = subTab.getRange(2, 11, lastDbRow - 1, 1).getValues().flat();
+        const recordedRefsStr = recordedRefs.map(r => String(r).trim());
+
+        if (recordedRefsStr.includes(currentRef)) {
+          ui.alert(
+            `🚫 FETCH BLOCKED\n\n` +
+            `You cannot use this file more than 1.\n\n` +
+            `Make a copy of the file "(Master) BTT Template" instead.`
+          );
+          return; // STOP EXECUTION
+        }
+      }
+    }
+  } catch (err) {
+    console.error("Database Validation Error: " + err.message);
+    ui.alert("⚠️ Database connection warning: Could not verify Reference Status.");
+  }
+
+  // ==========================================
+  // EXISTING FETCH LOGIC (With source linkage safeguards)
+  // ==========================================
   const sheet = ss.getSheetByName(tabName);
   if (!sheet) return;
 
   const dataStartRow = 13; 
 
-  // ==========================================
-  // CHECK FOR OVERWRITE (Col E13 Downwards)
-  // ==========================================
-  const lastSheetRow = sheet.getLastRow();
-  let hasExistingData = false;
-
-  if (lastSheetRow >= dataStartRow) {
-    const colE_values = sheet.getRange(dataStartRow, 5, lastSheetRow - dataStartRow + 1, 1).getValues();
-    hasExistingData = colE_values.some(row => {
-      const val = row[0];
-      if (val === "" || val === null || val === undefined || val === false) return false;
-      return String(val).trim() !== ""; 
-    });
-  }
-
-
   const sourceLink = sheet.getRange("A1").getValue();
   if (!sourceLink) { 
-    SpreadsheetApp.getUi().alert("Paste SOURCE LINK in cell C7 in Instructions Tab.");
+    ui.alert("Paste SOURCE LINK in cell C7 in Instructions Tab (or ensure A1 references it)."); 
     return; 
   }
 
@@ -210,18 +282,18 @@ function fetchDataOnly(tabName) {
   try { 
     sourceSS = SpreadsheetApp.openByUrl(sourceLink); 
   } catch (e) { 
-    SpreadsheetApp.getUi().alert("Cannot open source link."); 
+    ui.alert("Cannot open source link."); 
     return; 
   }
 
   if (sourceSS.getId() === ss.getId()) {
-    SpreadsheetApp.getUi().alert("FETCH CANCELLED: You are using the current spreadsheet's URL. Please paste an external source link in C7 in Instruction Tab.");
+    ui.alert("FETCH CANCELLED: You are using the current spreadsheet's URL. Please use an external source link.");
     return;
   }
   
   const sourceSheet = sourceSS.getSheetByName(tabName);
   if (!sourceSheet) { 
-    SpreadsheetApp.getUi().alert(`Tab "${tabName}" not found in source.`); 
+    ui.alert(`Tab "${tabName}" not found in source.`); 
     return; 
   }
 
@@ -231,32 +303,6 @@ function fetchDataOnly(tabName) {
 
   const rawData = sourceSheet.getRange(dataStartRow, 1, lastSourceRow - dataStartRow + 1, lastSourceCol).getValues();
 
-  // --- STAGE 1: VALIDATION PASS (Data Integrity only) ---
-  for (let i = 0; i < rawData.length; i++) {
-    let row = rawData[i];
-    let vA_source = String(row[0] || "").trim();
-    let vA_low = vA_source.toLowerCase();
-    
-    // Create logic for what represents a subtotal text line
-    let isSubTotal = vA_low.includes("subtotal") || vA_low.includes("sub-total") || vA_low.includes("sub total");
-    
-    // Ignore footer text but allow subtotal text safely
-    if (vA_low.includes("total") && !isSubTotal) break; 
-
-    // Skip Data Validation IF row is a recognized subtotal
-    if (!isSubTotal) {
-      let vB = String(row[1] || "").trim();
-      let vE = String(row[4] || "").trim();
-
-      if (vE !== "" && vB === "") {
-        SpreadsheetApp.getUi().alert(
-          `FETCH CANCELLED: Data Integrity Error\n\nRow ${i + dataStartRow} in the Source Tab "${tabName}" is incomplete. Column E has a value but Column B is missing.`
-        );
-        return; 
-      }
-    }
-  }
-
   // --- STAGE 2: PROCESSING ---
   if (sheet.getMaxColumns() < 29) {
     sheet.insertColumnsAfter(sheet.getMaxColumns(), 29 - sheet.getMaxColumns());
@@ -264,71 +310,101 @@ function fetchDataOnly(tabName) {
 
   const destWidth = sheet.getMaxColumns(); 
   const pasteArray = [];
+  
+  // Requires global variables: EXCLUSIONS, FETCH_MAPS, colToIdx externally defined!
   const skipIndices = (EXCLUSIONS[tabName] || []).map(letter => colToIdx(letter));
   const mapping = FETCH_MAPS[tabName] || {};
 
   let totalFound = false;
   let rowCounter = 0; 
 
-  const addFooterToPasteArray = (labelA) => {
-    if (pasteArray.length > 0) {
-      let lastRow = pasteArray[pasteArray.length - 1];
-      if (!lastRow.every(cell => cell === "")) pasteArray.push(new Array(destWidth).fill(""));
+  // --- 1. Identify the *Absolute Last* TOTAL row by looping from bottom to top ---
+  let lastTotalIndex = -1;
+  for (let i = rawData.length - 1; i >= 0; i--) {
+    let checkVal = String(rawData[i][0] || "").trim().toLowerCase();
+    let isSub = checkVal.includes("subtotal") || checkVal.includes("sub-total") || checkVal.includes("sub total");
+    
+    // Grabs final bottom match:
+    if (checkVal.includes("total") && !isSub) {
+      lastTotalIndex = i;
+      break; 
     }
-    let totalRow = new Array(destWidth).fill("");
-    totalRow[0] = labelA; 
-    pasteArray.push(totalRow);
-    for (let s = 0; s < 3; s++) pasteArray.push(new Array(destWidth).fill(""));
-    let sigRow = new Array(destWidth).fill("");
-    sigRow[0] = "Prepared By:"; sigRow[7] = "Checked By:"; sigRow[28] = "Noted By:";
-    pasteArray.push(sigRow);
-  };
+  }
 
+  // --- 2. Iterate array pulling everything systematically into destRows mapping ---
   for (let i = 0; i < rawData.length; i++) {
     let sourceRow = rawData[i];
     let valA_source = String(sourceRow[0] || "").trim();
     let valA_lower = valA_source.toLowerCase();
     
-    // Redefining isSubTotal again to verify current line
     let isSubTotal = valA_lower.includes("subtotal") || valA_lower.includes("sub-total") || valA_lower.includes("sub total");
+    let isTerminatingTotal = (i === lastTotalIndex); 
+    let isIntermediateTotal = (!isTerminatingTotal && valA_lower.includes("total") && !isSubTotal);
 
-    if (valA_lower.includes("total") && !isSubTotal) {
-      totalFound = true;
-      addFooterToPasteArray(valA_source); 
-      break; 
-    }
-
-    let vB = String(sourceRow[1] || "").trim();
-    let vE = String(sourceRow[4] || "").trim();
-
-    // EXEMPTION APPLIED HERE: If it's normal valid data (B+E) *OR* a subtotal... PULL THE ROW!
-    if ((vB !== "" && vE !== "") || isSubTotal) {
-      let destRow = new Array(destWidth).fill(""); 
+    let rowHasData = sourceRow.some(cell => String(cell).trim() !== "");
+    
+    if (rowHasData || isSubTotal || isIntermediateTotal || isTerminatingTotal) {
       
-      // Determine what to place in Column A based on what the row actually is
-      if (!isSubTotal) {
-        rowCounter++;
-        destRow[0] = rowCounter; // auto-numbering only counts real items
-      } else {
-        destRow[0] = valA_source; // writes the subtotal word over properly!
+      // Inject aesthetic space/gap above Final Terminating row
+      if (isTerminatingTotal) {
+        if (pasteArray.length > 0 && !pasteArray[pasteArray.length - 1].every(cell => cell === "")) {
+          pasteArray.push(new Array(destWidth).fill(""));
+        }
       }
 
+      let destRow = new Array(destWidth).fill("");
+      
+      // Assing Label Name in Column 1 naturally
+      if (isSubTotal || isIntermediateTotal || isTerminatingTotal) {
+        destRow[0] = valA_source; 
+      } else {
+        rowCounter++;
+        destRow[0] = rowCounter; 
+      }
+
+      // Loop directly through and filter
       for (let c = 1; c < sourceRow.length; c++) {
         if (skipIndices.includes(c)) continue;
         if (c < destWidth) destRow[c] = sourceRow[c];
       }
 
+      // Explicit target mappings applying uniformly
       Object.keys(mapping).forEach(targetCol => {
         let sIdx = colToIdx(mapping[targetCol]);
         let tIdx = colToIdx(targetCol);
         if (sourceRow[sIdx] !== undefined) destRow[tIdx] = sourceRow[sIdx];
       });
+
       pasteArray.push(destRow);
+    }
+
+    // BREAK SCRIPT LOGIC & ATTACH FOOTER 
+    // Wait until mapping is finished inside the array cleanly before stopping it and writing the footprint
+    if (isTerminatingTotal) {
+      totalFound = true;
+      
+      for (let s = 0; s < 3; s++) pasteArray.push(new Array(destWidth).fill("")); // Sign spaces
+
+      let sigRow = new Array(destWidth).fill("");
+      sigRow[0] = "Prepared By:"; sigRow[7] = "Checked By:"; sigRow[28] = "Noted By:";
+      pasteArray.push(sigRow);
+      break; 
     }
   }
 
-  // If no Total row was ever found, add a generic one at the end
-  if (!totalFound) addFooterToPasteArray("TOTAL"); 
+  // Check fallback protocol incase data lacked standard totals universally 
+  if (!totalFound) { 
+    if (pasteArray.length > 0 && !pasteArray[pasteArray.length - 1].every(cell => cell === "")) {
+       pasteArray.push(new Array(destWidth).fill(""));
+    }
+    let dummyTotalRow = new Array(destWidth).fill("");
+    dummyTotalRow[0] = "TOTAL"; 
+    pasteArray.push(dummyTotalRow);
+    for (let s = 0; s < 3; s++) pasteArray.push(new Array(destWidth).fill(""));
+    let dummySig = new Array(destWidth).fill("");
+    dummySig[0] = "Prepared By:"; dummySig[7] = "Checked By:"; dummySig[28] = "Noted By:";
+    pasteArray.push(dummySig);
+  }
 
   // --- FINAL STEP: AUTO-CLEAR ROW 13+, PASTE, AND ALIGN ---
   const maxRows = sheet.getMaxRows();
@@ -346,7 +422,7 @@ function fetchDataOnly(tabName) {
     destinationRange.setVerticalAlignment("middle");
   }
   
-  SpreadsheetApp.getActive().toast(`Fetch complete. Subtotals retained correctly. Data on/after TOTAL row ignored.`, "Success");
+  SpreadsheetApp.getActive().toast(`Fetch complete. Mapped Columns apply flawlessly to intermediate totals. Unused trailing data ignored.`, "Success", 5);
 }
 
 /* =================================
@@ -400,7 +476,7 @@ function applyFormulasToSheet(tabName) {
     AG: (r) => `=IFERROR(L${r}-AF${r},"-")`,
     AH: (r) => `=IFERROR(AG${r}/AF${r},"-")`,
     AJ: (r) => `=IFERROR(P${r}-AI${r},"-")`,
-    AK: (r) => `=IFERROR(AI${r}/AJ${r},"-")`,
+    AK: (r) => `=IFERROR(AJ${r}/AI${r},"-")`,
   };
 
   const formulaMapWater = {
@@ -420,7 +496,7 @@ function applyFormulasToSheet(tabName) {
     AG: (r) => `=IFERROR(L${r}-AF${r},"-")`,
     AH: (r) => `=IFERROR(AG${r}/AF${r},"-")`,
     AJ: (r) => `=IFERROR(W${r}-AI${r},"-")`,
-    AK: (r) => `=IFERROR(AI${r}/AJ${r},"-")`,
+    AK: (r) => `=IFERROR(AJ${r}/AI${r},"-")`,
   };
 
   const formulaMapLPG = {
@@ -434,10 +510,10 @@ function applyFormulasToSheet(tabName) {
     AA: (r) => `=IFERROR(N${r}*Z${r},"-")`,
     AB: (r) => `=IFERROR(P${r}-AA${r},"-")`,
     AC: (r) => `=IFERROR((O${r}-Z${r})/Z${r}, "-")`,
-    AG: (r) => `=IFERROR(L${r}-AF${r},"-")`,
+    AG: (r) => `=IFERROR(N${r}-AF${r},"-")`,
     AH: (r) => `=IFERROR(AG${r}/AF${r},"-")`,
     AJ: (r) => `=IFERROR(P${r}-AI${r},"-")`,
-    AK: (r) => `=IFERROR(AI${r}/AJ${r},"-")`,
+    AK: (r) => `=IFERROR(AJ${r}/AI${r},"-")`,
   };
 
   const activeMap = (tabName === "Water") ? formulaMapWater : (tabName === "LPG" ? formulaMapLPG : formulaMapElec);
@@ -615,19 +691,22 @@ function scanTab(tabName, shouldClearLogs = true) {
     const rowNum = CONFIG.dataStartRow + i;
     const row = dataValues[i];
 
-    // --- STEP 1: RUN CHECKLIST FIRST (This triggers the Col A/E hard-stop) ---
-    runCommonChecklist(row, rowNum, (r, c, m, res, arr) => logHelper(row, r, c, m, res, arr), valL5, valL6);
-
-    const labelA = String(row[0]).trim();
+    // Read column E and A values first
     const valE = String(row[colToIdx("E")] || "").trim();
+    const labelA = String(row[0] || "").trim();
+    
+    // --- NEW: STRICT COLUMN E SKIP LOGIC ---
+    // If Column E is empty, skip to the next row immediately
+    if (valE === "") continue;
 
-    // --- STEP 2: SKIP ROW LOGIC ---
-    // Only skip if the row is actually empty (No A and No E) or if it's a Total
+    // Continue to ignore "Total" rows at the bottom
     const normalizedLabelA = labelA.toLowerCase().replace(/[^a-z]/g, "");
     if (normalizedLabelA.includes("total")) continue;
-    if (labelA === "" && valE === "") continue;
 
-    // --- STEP 3: KA VALIDATION ---
+    // --- STEP 1: RUN CHECKLIST (Now safely checking ONLY valid rows) ---
+    runCommonChecklist(row, rowNum, (r, c, m, res, arr) => logHelper(row, r, c, m, res, arr), valL5, valL6);
+
+    // --- STEP 2: KA VALIDATION ---
     if (kaRefMap) {
       const valF = String(row[colToIdx("F")] || "").trim().toUpperCase();
       const valG = String(row[colToIdx("G")] || "").trim().toUpperCase();
@@ -658,7 +737,7 @@ function scanTab(tabName, shouldClearLogs = true) {
       }
     }
 
-    // --- STEP 4: TAB SPECIFIC CALCULATIONS ---
+    // --- STEP 3: TAB SPECIFIC CALCULATIONS ---
     switch(tabName) {
       case "Elec":
         if (!(typeof row[colToIdx("Q")] === 'number' && row[colToIdx("Q")] > 0)) logHelper(row, rowNum, "Q", "Amount should be a number > 0");
@@ -909,6 +988,7 @@ function confirmFetchOverwrite(tabName) {
 function recordActivePBTT() {
   const lock = LockService.getScriptLock();
   try {
+    // Wait for up to 30 seconds for other processes to finish.
     lock.waitLock(30000); 
   } catch (e) {
     SpreadsheetApp.getUi().alert("Server Busy. Please try again.");
@@ -917,150 +997,154 @@ function recordActivePBTT() {
 
   try {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
+    // ⚠️ ID of the Master Database
     const masterDbId = "1hMMUd4ho50HP63dc2fRAo--iK-m7YotamkKtsDGT_Us"; 
 
     // Define the specific columns to check for each tab
     const tabValidationMaps = {
-      "Elec":  ["L","O","P","Q","Z","AA","AB","AC","AG","AH","AJ","AK"],
-      "Water": ["L","O","P","S","T","U","V","W","X","Z","AA","AB","AC","AG","AH","AJ","AK"],
-      "LPG":   ["L","M","N","O","P","Q","Z","AA","AB","AC","AG","AH","AJ","AK"]
+      "Elec":  ["B","C","D","H","I","J","K","L","O","P","Q","Y","Z","AA","AB","AC","AG","AH","AJ","AK"],
+      "Water": ["B","C","D","H","J","K","L","O","P","S","T","U","V","W","X","Y","Z","AA","AB","AC","AG","AH","AJ","AK"],
+      "LPG":   ["B","C","D","H","J","K","L","M","N","O","P","Q","Y","Z","AA","AB","AC","AG","AH","AJ","AK"]
     };
 
-    // 1. GET THE PERMANENT REF# FROM INSTRUCTIONS
+    const ui = SpreadsheetApp.getUi();
+
+    // ===============================================
+    // 1. REF# & DATE SETUP
+    // ===============================================
     const instSheet = ss.getSheetByName("Instructions");
-    const currentRef = instSheet ? instSheet.getRange("C7").getValue().toString().trim() : "";
+    if (!instSheet) {
+      ui.alert("❌ ERROR: 'Instructions' tab not found.");
+      return;
+    }
+
+    // Ref Check (C7)
+    const currentRef = instSheet.getRange("C7").getValue().toString().trim();
     if (currentRef === "") {
-      SpreadsheetApp.getUi().alert("❌ ERROR: No Reference Number found in 'Instructions' tab C7.");
+      ui.alert("❌ ERROR: No Reference Number found in 'Instructions' tab C7.");
+      return;
+    }
+
+    // Get Target Dates (C26, C27)
+    const rawTargetStart = instSheet.getRange("C26").getValue();
+    const rawTargetEnd = instSheet.getRange("C27").getValue();
+
+    // Helper to normalize dates (strip time) for accurate comparison
+    const normalizeDate = (d) => {
+      if (!d || !(d instanceof Date) || isNaN(d.getTime())) return null;
+      const n = new Date(d);
+      n.setHours(0, 0, 0, 0); // Reset time to midnight
+      return n.getTime(); // Use numeric time for easy comparison
+    };
+
+    const targetStartInfo = normalizeDate(rawTargetStart);
+    const targetEndInfo = normalizeDate(rawTargetEnd);
+
+    if (!targetStartInfo || !targetEndInfo) {
+      ui.alert("❌ ERROR: Invalid or missing billing dates in 'Instructions' tab (C26/C27).");
       return;
     }
 
     // ===============================================
-    // 1.5 CHECK C15 URL MATCH TO ACTIVE FILE (Anti-Template Submission)
-    // ===============================================
-    const c15Value = instSheet ? instSheet.getRange("C15").getValue().toString().trim() : "";
-    const activeFileId = ss.getId();
-    
-    // Checks if the C15 URL contains the exact ID of the currently open spreadsheet
-    if (c15Value !== "" && c15Value.includes(activeFileId)) {
-      SpreadsheetApp.getUi().alert(
-        `🚫 SUBMISSION BLOCKED\n\n` +
-        `This file's URL matches the protected link in Instructions C15.\n\n` +
-        `You cannot submit the master template directly. Please make a copy, enter your data on the new file, and submit from there.`
-      );
-      return; // Stop execution
-    }
-
-    // ===============================================
-    // 2. PERIOD LOCK CHECKER
+    // 2. PERIOD STATUS VALIDATION (Match C26/C27 + Check Lock & Bypass)
     // ===============================================
     const dbPeriodTab = "dvPeriod";
+    let periodFound = false;
+    let periodIsActive = false;
+    let periodIsLocked = false; 
+    let lockDateFormatted = "";
+
     try {
       const dbSs = SpreadsheetApp.openById(masterDbId);
       const periodSheet = dbSs.getSheetByName(dbPeriodTab);
       const periodData = periodSheet.getDataRange().getValues();
       
       const today = new Date();
-      // Set to midnight (00:00:00) to ensure strict day-to-day comparison
-      today.setHours(0, 0, 0, 0); 
-      
-      const currentMonth = today.getMonth();
-      const currentYear = today.getFullYear();
-      
-      let expiredDates = [];
-      let currentMonthActive = false;
-      let otherActivePeriods = [];
-      let currentMonthInactive = false;
+      today.setHours(0, 0, 0, 0);
 
-      // Scan all rows to check conditions
+      // Iterate DB to find the specific period in C26/C27
       for (let i = 1; i < periodData.length; i++) {
-        if (!periodData[i][2]) continue; // Skip if Col C is empty
+        const row = periodData[i];
         
-        const rowDate = new Date(periodData[i][2]);
-        if (isNaN(rowDate.getTime())) continue; // Skip if Col C isn't a valid date
-        
-        rowDate.setHours(0, 0, 0, 0); // Set to midnight for exact matching
-        
-        const status = String(periodData[i][3]).trim(); // Column D
-        const bypassFlag = String(periodData[i][4] || "").trim(); // Column E
-        const isActive = (status === "Active");
+        // Col A (Start) & Col B (End)
+        const dbStart = normalizeDate(row[0]);
+        const dbEnd = normalizeDate(row[1]);
 
-        // CHECK COLUMNS A & B for CURRENT MONTH match
-        const dateA = new Date(periodData[i][0]);
-        const dateB = new Date(periodData[i][1]);
-        
-        let isCurrentMonth = false;
-        
-        // If either Col A or Col B is exactly the same month/year as Today, treat as current month
-        if (!isNaN(dateA.getTime()) && dateA.getMonth() === currentMonth && dateA.getFullYear() === currentYear) {
-            isCurrentMonth = true;
-        } else if (!isNaN(dateB.getTime()) && dateB.getMonth() === currentMonth && dateB.getFullYear() === currentYear) {
-            isCurrentMonth = true;
-        }
-        
-        if (isActive) {
-          // CHECK EXPIRATION AND BYPASS
-          // If today has reached/passed the date AND there is NO "Bypass" flag
-          if (today >= rowDate && bypassFlag !== "Bypass") {
-            // Expired! (Will block)
-            expiredDates.push(Utilities.formatDate(rowDate, "Asia/Manila", "MMM d, yyyy"));
-          } else {
-            // VALID! (Either Today is still before the date, OR the "Bypass" flag is active)
-            if (isCurrentMonth) {
-              currentMonthActive = true;
-            } else {
-              otherActivePeriods.push(Utilities.formatDate(dateA, "Asia/Manila", "MMMM yyyy"));
-            }
+        // MATCH FOUND?
+        if (dbStart === targetStartInfo && dbEnd === targetEndInfo) {
+          periodFound = true;
+          
+          // 1. Check Status (Col D)
+          const status = String(row[3]).trim();
+          if (status === "Active") {
+            periodIsActive = true;
           }
-        } else {
-          // If inactive, check if it's for the current month
-          if (isCurrentMonth) {
-            currentMonthInactive = true;
+
+          // 2. Check Lock Date (Col C) & Bypass (Col E)
+          if (row[2]) {
+             const lockDate = new Date(row[2]);
+             lockDate.setHours(0,0,0,0);
+             
+             // Get Bypass Value from Column E (Index 4)
+             const bypassTag = String(row[4] || "").trim();
+
+             // Logic: If Today >= Lock Date
+             if (today >= lockDate) {
+               if (bypassTag === "Bypass") {
+                 // ALLOWED: Bypass is active, ignore lock.
+                 periodIsLocked = false; 
+               } else {
+                 // BLOCKED: Lock date met and NO Bypass tag.
+                 periodIsLocked = true;
+                 lockDateFormatted = Utilities.formatDate(lockDate, "Asia/Manila", "MMM d, yyyy");
+               }
+             }
           }
+          break; // Stop looking once the matching period is found
         }
       }
+
+      // -- VALIDATE FINDINGS --
       
-      const ui = SpreadsheetApp.getUi();
-
-      // RULE 1: Valid Active Current Month -> Smooth submission
-      if (currentMonthActive) {
-        // Validation passes completely! The script continues below.
-      } 
-      // RULE 2: Valid Active OTHER Month -> Prompt Confirmation
-      else if (otherActivePeriods.length > 0) {
-        const uniquePeriods = [...new Set(otherActivePeriods)];
-        
-        const msg = `⚠️ SUBMISSION CONFIRMATION\n\nThe current month is not active. However, the following period(s) are actively open:\n\n- ${uniquePeriods.join("\n- ")}\n\nDo you want to submit at this late of date?\n\n(Note: Please make sure to activate a period that is ahead from the date today.)`;
-        
-        const response = ui.alert("Confirm Submission", msg, ui.ButtonSet.YES_NO);
-        
-        if (response !== ui.Button.YES) {
-          return; // Stop execution
-        }
-        // If YES, the code naturally continues.
-      } 
-      // RULE 3: Expiration Date Reached (And NOT bypassed) -> Block
-      else if (expiredDates.length > 0) {
-        const uniqueExpired = [...new Set(expiredDates)];
-        ui.alert(`🚫 SUBMISSION BLOCKED\n\nAll 'Active' periods have reached their lock date. Submissions are no longer allowed from these dates onwards:\n- ${uniqueExpired.join("\n- ")}\n\n(Note: An admin can override this by typing 'Bypass' in Column E. \n\n Contact @knceneta@megaworld-lifestyle.com for assistance)`);
-        return; // Stops execution
+      // Error 1: Dates don't match any row in DB
+      if (!periodFound) {
+        ui.alert(
+          "🚫 CONFIGURATION ERROR\n\n" +
+          "The dates in Instructions C26 & C27 do not match any known period in the master database.\n" +
+          "Please verify your billing start/end dates."
+        );
+        return;
       }
-      // RULE 4: Current month is actively tagged "Inactive"
-      else if (currentMonthInactive) {
-        ui.alert("🚫 CURRENT PERIOD INACTIVE\n\nPlease activate the current period first before proceeding.\n\n Contact @knceneta@megaworld-lifestyle.com for assistance");
-        return; // Stops execution
-      } 
-      // RULE 5: Completely empty / no active periods at all
-      else {
-        ui.alert("🚫 NO ACTIVE PERIOD\n\nThere are no active periods available to accept this submission. \n\n Contact @knceneta@megaworld-lifestyle.com for assistance");
-        return; // Stops execution
+
+      // Error 2: Period found but marked Inactive/Closed
+      if (!periodIsActive) {
+        ui.alert(
+          "🚫 SUBMISSION BLOCKED\n\n" +
+          "The billing period defined is set to 'Inactive' in the system.\n\n" +
+          "Please contact the administrator."
+        );
+        return;
+      }
+
+      // Error 3: Locked (Date Passed AND No Bypass)
+      if (periodIsLocked) {
+        ui.alert(
+          `🚫 PERIOD LOCKED\n\n` +
+          `The active period defined is reached its Lock Date on ${lockDateFormatted}.\n` +
+          `Submission is blocked.\n\n` +
+          `To submit, a 'Bypass' tag is required from Admin.`
+        );
+        return;
       }
 
     } catch (err) { 
-      SpreadsheetApp.getUi().alert("❌ Validation Error: " + err.message); 
+      ui.alert("❌ Validation Connection Error: " + err.message); 
       return; 
     }
 
-    // --- 3. TAB-SPECIFIC VALIDATION PASS ---
+    // ===============================================
+    // 3. TAB SPECIFIC VALIDATION
+    // ===============================================
     for (let tabName in tabValidationMaps) {
       let currentSheet = ss.getSheetByName(tabName);
       if (!currentSheet) continue; 
@@ -1071,108 +1155,161 @@ function recordActivePBTT() {
 
       // Fetch up to Column AK (37 columns)
       let dataRange = currentSheet.getRange(startRow, 1, lastRow - startRow + 1, 37).getValues();
+      let displayRange = currentSheet.getRange(startRow, 1, lastRow - startRow + 1, 37).getDisplayValues();
+      
       let requiredCols = tabValidationMaps[tabName];
 
       for (let i = 0; i < dataRange.length; i++) {
         let rowData = dataRange[i];
         let valA = String(rowData[0] || "").toLowerCase();
 
-        // STOP checking this tab if we hit the TOTAL row
+        // STOP checking if we hit TOTAL row
         if (valA.includes("total") && !valA.includes("sub")) break;
 
         let rawValE = rowData[4]; 
         let valE = (rawValE === undefined || rawValE === null) ? "" : String(rawValE).trim();
         
-        // If Column E has data, validate the tab-specific columns
+        // If Column E has data, validate the specific required columns
         if (valE !== "") {
           for (let colLetter of requiredCols) {
-            let colIdx = colToIdx(colLetter); // Ensure colToIdx() helper exists in your script
+            let colIdx = colToIdx(colLetter); // Requires external helper colToIdx
             let rawCellVal = rowData[colIdx];
-            
-            // Convert to string safely (preserves numeric 0 and boolean false)
             let cellValue = (rawCellVal === undefined || rawCellVal === null) ? "" : String(rawCellVal).trim();
+            
+            // Get visible display value specifically to detect characters like "%" natively formatted
+            let visibleCellVal = (displayRange[i][colIdx] || "").trim();
 
-            // Check if purely blank. 0, 0.00, and "-" are no longer blocked!
+            // 1. Existing Checker: Must not be blank
             if (cellValue === "") {
-              SpreadsheetApp.getUi().alert(
+              ui.alert(
                 `🚫 INCOMPLETE DATA\n\n` +
                 `Tab: [${tabName}]\n` +
                 `Row: ${i + startRow}\n` +
                 `Column: ${colLetter}\n\n` +
-                `This cell is completely blank but is required because Column E has a value. Please fix before recording.`
+                `Required field is blank.`
               );
-              return; // STOP the entire process
+              return; 
             }
+
+            // 2. Checker for Col O: Cannot be 0 (but accepts other valid characters/symbols)
+            if (colLetter === "O" && (cellValue === "0" || cellValue === "0.00" || rawCellVal === 0)) {
+               ui.alert(
+                `🚫 INVALID DATA\n\n` +
+                `Tab: [${tabName}]\n` +
+                `Row: ${i + startRow}\n` +
+                `Column: O\n\n` +
+                `Value cannot be exactly 0 (zero) when Column E has data. It can be any other valid character.`
+              );
+              return; 
+            }
+
+            // 3. UPDATED Checker for Col P: 
+            // - ALLOWED completely if it contains "%".
+            // - If NO "%", it MUST be a valid number and CANNOT be exactly 0.
+            if (colLetter === "P") {
+              
+              if (visibleCellVal.includes("%")) {
+                // Allowed blindly: continue seamlessly to next loop iteration
+                continue; 
+              } else {
+                // Since there is no %, strict check to ensure it's a number and not 0
+                let numVal = Number(cellValue); 
+                if (isNaN(numVal) || numVal === 0) {
+                  ui.alert(
+                    `🚫 INVALID ENTRY\n\n` +
+                    `Tab: [${tabName}]\n` +
+                    `Row: ${i + startRow}\n` +
+                    `Column: P\n\n` +
+                    `Make sure the value is not equal to 0 or set as percentage (%)`
+                  );
+                  return;
+                }
+              }
+
+            }
+
           }
         }
       }
     }
 
-    // 4. FIND THE CORRECT SHEET TO EXTRACT HEADERS (Prop Name, Dates)
+    // ===============================================
+    // 4. DATA EXTRACTION AND SUBMISSION (UPDATED)
+    // ===============================================
+    
+    // Find Header Sheet
     let activeSheet = ss.getActiveSheet();
     let headerSheet = tabValidationMaps[activeSheet.getName()] ? activeSheet : 
                       Object.keys(tabValidationMaps).map(n => ss.getSheetByName(n)).find(s => s !== null);
     
     if (!headerSheet) {
-      SpreadsheetApp.getUi().alert("🚫 Error: No utility tabs (Elec, Water, LPG) found.");
+      ui.alert("🚫 Error: No utility tabs (Elec, Water, LPG) found.");
       return;
     }
 
-    // Assumes processSheetHeaders() is available
+    // Process Headers (Assumes existing helper)
     const extractedData = processSheetHeaders(headerSheet);
     if (!extractedData) return;
 
-    // 5. DUPLICATE CHECK
+    // Connect to DB
     const props = PropertiesService.getScriptProperties();
     let activeDB_ID = props.getProperty("ACTIVE_DB_ID") || masterDbId;
     let db = SpreadsheetApp.openById(activeDB_ID);
     let dSh = db.getSheetByName("PBTT Submission");
-    let lastRowDb = dSh.getLastRow();
 
-    if (lastRowDb >= 5) {
-      const dbRangeValues = dSh.getRange(5, 2, lastRowDb - 4, 10).getValues();
-      const rawStart = headerSheet.getRange("E7").getValue();
-      const rawEnd = headerSheet.getRange("E8").getValue();
-      const fmt = (d) => d ? Utilities.formatDate(new Date(d), "Asia/Manila", "yyyy-MM-dd") : "";
-      const currentStart = fmt(rawStart);
-      const currentEnd = fmt(rawEnd);
-
-      for (let i = 0; i < dbRangeValues.length; i++) {
-        const row = dbRangeValues[i];
-        
-        if (String(row[9]).trim() === currentRef) {
-          SpreadsheetApp.getUi().alert(`🚫 BLOCK: Reference ${currentRef} is already recorded.`);
-          return;
-        }
-        
-        const isDataMatch = (
-          String(row[0]).trim().toLowerCase() === String(extractedData[0]).trim().toLowerCase() && 
-          String(row[1]).trim().toLowerCase() === String(extractedData[1]).trim().toLowerCase() && 
-          fmt(row[4]) === currentStart && fmt(row[5]) === currentEnd
-        );
-        if (isDataMatch) {
-          SpreadsheetApp.getUi().alert("🚫 DUPLICATE ERROR: Billing period already submitted.");
-          return;
-        }
-      }
-    }
-
-    // 6. DATABASE SUBMISSION
+    // Prepare Payload
     const timestamp = Utilities.formatDate(new Date(), "Asia/Manila", "MMM d, yyyy hh:mm a");
     const userEmail = Session.getActiveUser().getEmail();
     const activeFileName = ss.getName();
     const ssUrl = ss.getUrl();
 
+    // Final Array [Timestamp, ...Data, File, Url, Email, Ref#]
+    // currentRef is the LAST item in the array.
     const finalRow = [timestamp, ...extractedData, activeFileName, ssUrl, userEmail, currentRef];
-    dSh.appendRow(finalRow);
 
-    SpreadsheetApp.getUi().alert(`✅ SUCCESS: Submitted successfully.`);
+    // --- OVERWRITE LOGIC START ---
+    
+    const dbData = dSh.getDataRange().getValues();
+    let rowIndexToOverwrite = -1;
+    // Assume currentRef is in the last column of the data being submitted
+    const refColumnIndex = finalRow.length - 1; 
 
+    // Loop through DB to see if REF# already exists (Start at 1 to skip Header)
+    for (let r = 1; r < dbData.length; r++) {
+      let existingRef = String(dbData[r][refColumnIndex] || "").trim();
+      
+      // Match Found?
+      if (existingRef === currentRef) {
+        rowIndexToOverwrite = r + 1; // 0-based array to 1-based row index
+        break;
+      }
+    }
+
+    if (rowIndexToOverwrite > 0) {
+      // Overwrite existing row
+      dSh.getRange(rowIndexToOverwrite, 1, 1, finalRow.length).setValues([finalRow]);
+      ui.alert(`✅ SUCCESS: Submission updated (Overwrite existing Ref# ${currentRef}).`);
+    } else {
+      // Create new row
+      dSh.appendRow(finalRow);
+      ui.alert(`✅ SUCCESS: New submission recorded successfully.`);
+    }
+    
   } catch (x) {
     SpreadsheetApp.getUi().alert("System Error: " + x.message);
   } finally {
     lock.releaseLock();
   }
+}
+
+// Helper: Column Letter to Index
+function colToIdx(char) {
+    let sum = 0;
+    for (let i = 0; i < char.length; i++) {
+        sum *= 26;
+        sum += char.charCodeAt(i) - 'A'.charCodeAt(0) + 1;
+    }
+    return sum - 1;
 }
 
 /**
@@ -1190,8 +1327,26 @@ function colToIdx(letter) {
  * and checking for correct dates.
  */
 function processSheetHeaders(sheet) {
+
+   const sourceFileUrl = sheet.getRange("A1").getValue().toString().trim();
+    const textToCheck = sourceFileUrl.toUpperCase(); // Used to easily check N/A or NA regardless of capitalization
+
+    // Block IF: it is completely empty OR it does NOT contain 'http' AND is NOT 'N/A' AND is NOT 'NA'
+    if (
+        sourceFileUrl === "" || 
+        !(sourceFileUrl.toLowerCase().includes("http") || textToCheck === "N/A" || textToCheck === "NA")
+    ) {
+        SpreadsheetApp.getUi().alert(
+            "🚫 SUBMISSION BLOCKED\n\n" +
+            "A valid SOURCE FILE URL is missing in cell C20 in Instruction Tab or A1 in Utilities Tab.\n" +
+            "Please provide a valid URL, or enter 'N/A' | 'NA' before submitting."
+        );
+        return null; // Stop the process completely
+    }
+
+    
     const config = [
-        { cell: "A1", label: "SOURCE FILE", type: "url" },
+        
         { cell: "E4", label: "PROPERTY NAME", type: "text" },
         { cell: "E6", label: "BILLER/PAYEE COMPANY:", type: "text" },
         { cell: "E5", label: "LOCATION", type: "text", sourceRange: "B13:B" },
