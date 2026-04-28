@@ -1,4 +1,4 @@
-# PBTT Utility ManagementS System
+# PBTT Utility Management System
 
 ## Introduction
 The **PBTT Utility Management System** is an advanced automation framework designed to manage, calculate, and audit utility billing data (Electricity, Water, and LPG). It streamlines the transition from raw consumption data to final **Projected Billing to Tenants (PBTT)**.
