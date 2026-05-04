@@ -428,12 +428,25 @@ function fetchDataOnly(tabName) {
 /* =================================
 4. RUN FORMULAS (FULL UPDATED VERSION)
 ================================= */
+
+// Tab-specific columns to be summed in Subtotal and Total rows
+const sumColsELEC = ["L", "N", "P", "Q", "AA", "AB", "AF", "AG", "AI", "AJ"];
+const sumColsWAT = ["L", "N", "P", "Q", "X", "AA", "AB", "AF", "AG", "AI", "AJ"];
+const sumColsLPG = ["L", "N", "P", "Q", "AA", "AB", "AF", "AG", "AI", "AJ"];
+
+/**
+ * Main function to apply formulas and logic based on the Tab Name
+ */
 function applyFormulasToSheet(tabName) {
   const ss = SpreadsheetApp.getActive();
   const sheet = ss.getSheetByName(tabName);
-  if (!sheet) return;
+  
+  if (!sheet) {
+    SpreadsheetApp.getUi().alert(`Sheet "${tabName}" not found.`);
+    return;
+  }
 
-  // 1. Mandatory Validations
+  // 1. MANDATORY VALIDATIONS
   const valL5 = sheet.getRange("L5").getValue();
   const valL6 = sheet.getRange("L6").getValue();
 
@@ -442,84 +455,42 @@ function applyFormulasToSheet(tabName) {
     return;
   }
 
-  if (tabName === "LPG") {
-    const valN10 = sheet.getRange("N10").getValue();
-    if (valN10 === "" || isNaN(valN10)) {
-      SpreadsheetApp.getUi().alert("❌ Action Blocked: N10 must contain a numeric value for LPG formulas.");
-      return;
-    }
+  if (Number(valL5) <= Number(valL6)) {
+    SpreadsheetApp.getUi().alert("❌ Action Blocked: L5 (Current Rate) must be greater than L6 (Previous Rate).");
+    return;
   }
 
+  // 2. DETERMINE ACTIVE SETTINGS BASED ON TAB
+  let activeMap;
+  let activeSumCols;
+
   if (tabName === "Water") {
+    activeMap = formulaMapWater;
+    activeSumCols = sumColsWAT;
     const valU10 = sheet.getRange("U10").getValue();
     if (valU10 === "" || isNaN(valU10)) {
       SpreadsheetApp.getUi().alert("❌ Action Blocked: U10 must contain a numeric value for Water formulas.");
       return;
     }
+  } else if (tabName === "LPG") {
+    activeMap = formulaMapLPG;
+    activeSumCols = sumColsLPG;
+    const valN10 = sheet.getRange("N10").getValue();
+    if (valN10 === "" || isNaN(valN10)) {
+      SpreadsheetApp.getUi().alert("❌ Action Blocked: N10 must contain a numeric value for LPG formulas.");
+      return;
+    }
+  } else {
+    // Default to Electricity
+    activeMap = formulaMapElec;
+    activeSumCols = sumColsELEC;
   }
 
-  if (Number(valL5) <= Number(valL6)) {
-    SpreadsheetApp.getUi().alert("❌ Action Blocked: L5 must be greater than L6.");
-    return;
-  }
-
-  // --- FORMULA DEFINITIONS ---
-  const formulaMapElec = {
-    L: (r) => `=IFERROR((K${r}-J${r})*I${r},"-")`,
-    O: (r) => `=IF(NOT(ISNUMBER($L$5)),"-",$L$5)`,
-    P: (r) => `=IFERROR(IF(O${r}="fix rate","Put/input",ROUND(L${r}*O${r}, 2)),"-")`,
-    Q: (r) => `=IFERROR(ROUND(P${r}*1.12, 2), "-")`,
-    Z: (r) => `=$L$6`,
-    AA: (r) => `=IFERROR(L${r}*Z${r},"-")`,
-    AB: (r) => `=IFERROR(P${r}-AA${r},"-")`,
-    AC: (r) => `=IFERROR((O${r}-Z${r})/Z${r}, "-")`,
-    AG: (r) => `=IFERROR(L${r}-AF${r},"-")`,
-    AH: (r) => `=IFERROR(AG${r}/AF${r},"-")`,
-    AJ: (r) => `=IFERROR(P${r}-AI${r},"-")`,
-    AK: (r) => `=IFERROR(AJ${r}/AI${r},"-")`,
-  };
-
-  const formulaMapWater = {
-    L: (r) => `=IFERROR(K${r}-J${r}, "-")`,
-    O: (r) => `=IF(NOT(ISNUMBER($L$5)),"-",$L$5)`,
-    P: (r) => `=IFERROR(IF(O${r}="fix rate", "Put/input", ROUND(ROUND(O${r}, 2) * ROUND(L${r}, 2), 2)),"-")`,
-    S: (r) => `=IF(NOT(ISNUMBER($U$10)),"-",$U$10)`,
-    T: (r) => `=IFERROR(S${r}*L${r},"-")`,
-    U: (r) => `=IFERROR(L${r}+T${r},"-")`,
-    V: (r) => `=IF(OR(J${r}="Fix Rate", O${r}="Fix Rate"), "-", IF(AND(ISNUMBER(P${r}), ISNUMBER(S${r})), P${r}*S${r}, "-"))`,
-    W: (r) => `=IFERROR(V${r}+P${r},"-")`,
-    X: (r) => `=IFERROR(IF(J${r}="fix rate", ROUND(P${r}*1.12, 2), ROUND(W${r}*1.12, 2)), "-")`,
-    Z: (r) => `=IF(NOT(ISNUMBER($L$6)),"-",$L$6)`,
-    AA: (r) => `=IFERROR(L${r}*Z${r},"-")`,
-    AB: (r) => `=IFERROR(W${r}-AA${r},"-")`,
-    AC: (r) => `=IFERROR((O${r}-Z${r})/Z${r}, "-")`,
-    AG: (r) => `=IFERROR(L${r}-AF${r},"-")`,
-    AH: (r) => `=IFERROR(AG${r}/AF${r},"-")`,
-    AJ: (r) => `=IFERROR(W${r}-AI${r},"-")`,
-    AK: (r) => `=IFERROR(AJ${r}/AI${r},"-")`,
-  };
-
-  const formulaMapLPG = {
-    L: (r) => `=IFERROR(K${r}-J${r}, "-")`,
-    M: (r) => `=if(not(isnumber($N$10)),".",$N$10)`,
-    N: (r) => `=iferror(L${r}*M${r},"-")`,
-    O: (r) => `=IF(NOT(ISNUMBER($L$5)),"-",$L$5)`,
-    P: (r) => `=IFERROR(IF(O${r}="fix rate","Put/input", ROUND(N${r}*O${r}, 2)),"-")`,
-    Q: (r) => `=IFERROR(ROUND(P${r}*1.12, 2), "-")`,
-    Z: (r) => `=IF(NOT(ISNUMBER($L$6)),"-",$L$6)`,
-    AA: (r) => `=IFERROR(N${r}*Z${r},"-")`,
-    AB: (r) => `=IFERROR(P${r}-AA${r},"-")`,
-    AC: (r) => `=IFERROR((O${r}-Z${r})/Z${r}, "-")`,
-    AG: (r) => `=IFERROR(N${r}-AF${r},"-")`,
-    AH: (r) => `=IFERROR(AG${r}/AF${r},"-")`,
-    AJ: (r) => `=IFERROR(P${r}-AI${r},"-")`,
-    AK: (r) => `=IFERROR(AJ${r}/AI${r},"-")`,
-  };
-
-  const activeMap = (tabName === "Water") ? formulaMapWater : (tabName === "LPG" ? formulaMapLPG : formulaMapElec);
+  // 3. IDENTIFY DATA RANGE AND STOP ROW (TOTAL ROW)
   const lastRow = sheet.getLastRow();
   const fullDataA = sheet.getRange(1, 1, lastRow, 1).getValues();
-  const fullDataE = sheet.getRange(1, colToIdx("E") + 1, lastRow, 1).getValues();
+  const colEIdx = colToIdx("E");
+  const fullDataE = sheet.getRange(1, colEIdx + 1, lastRow, 1).getValues();
 
   let stopRow = lastRow;
   for (let i = CONFIG.dataStartRow - 1; i < lastRow; i++) {
@@ -529,15 +500,18 @@ function applyFormulasToSheet(tabName) {
     }
   }
 
+  // 4. APPLY ROW-BY-ROW FORMULAS
   for (let i = CONFIG.dataStartRow - 1; i < stopRow; i++) {
     const r = i + 1;
     const labelA = String(fullDataA[i][0]).toLowerCase().trim();
     const valE = String(fullDataE[i][0]).trim();
 
+    // Skip if row is a total/subtotal row or column E is empty
     if (labelA.includes("total")) continue;
 
     if (valE === "") {
-      sheet.getRange(r, 1, 1, sheet.getLastColumn()).clearContent();
+      // Clear row content if ID/Name in column E is missing
+      sheet.getRange(r, 1, 1, 35).clearContent();
       continue;
     }
 
@@ -550,18 +524,20 @@ function applyFormulasToSheet(tabName) {
 
     let targetCols = Object.keys(activeMap);
 
+    // Skip formula injection if cells contain manual overrides
     if (valO !== "") targetCols = targetCols.filter(c => c !== "O");
-    if (valP !== "") targetCols = targetCols.filter(c => c !== "P");
+    if (valP !== "" && valP !== "Put/input") targetCols = targetCols.filter(c => c !== "P");
     if (valZ !== "") targetCols = targetCols.filter(c => c !== "Z");
-    if (valJ.includes("theoretical")) targetCols = targetCols.filter(c => c !== "L");
-    if (valK.includes("theoretical")) targetCols = targetCols.filter(c => c !== "L");
+    if (valJ.includes("theoretical") || valK.includes("theoretical")) {
+      targetCols = targetCols.filter(c => c !== "L");
+    }
 
     targetCols.forEach(colKey => {
       sheet.getRange(`${colKey}${r}`).setFormula(activeMap[colKey](r));
     });
   }
 
-  const sumCols = ["L", "N", "P", "Q", "AA", "AB", "AF", "AG", "AI", "AJ"];
+  // 5. APPLY SUBTOTAL AND TOTAL FORMULAS (TAB-SPECIFIC)
   let sectionStartRow = CONFIG.dataStartRow;
   let subTotalRowsFound = [];
 
@@ -572,7 +548,7 @@ function applyFormulasToSheet(tabName) {
 
     if (normalizedLabel.includes("subtotal")) {
       const rangeEnd = r - 1;
-      sumCols.forEach(col => {
+      activeSumCols.forEach(col => {
         sheet.getRange(`${col}${r}`).setFormula(`=SUM(${col}${sectionStartRow}:${col}${rangeEnd})`);
       });
       subTotalRowsFound.push(r);
@@ -580,7 +556,7 @@ function applyFormulasToSheet(tabName) {
     }
 
     if (normalizedLabel === "total") {
-      sumCols.forEach(col => {
+      activeSumCols.forEach(col => {
         let formula = "";
         if (subTotalRowsFound.length > 0) {
           let refs = subTotalRowsFound.map(subR => `${col}${subR}`).join(",");
@@ -594,29 +570,98 @@ function applyFormulasToSheet(tabName) {
     }
   }
 
+  // 6. CLEAN FOOTER (Area below the Total row)
   const lastSheetRow = sheet.getLastRow();
   if (lastSheetRow > stopRow) {
     const footerRange = sheet.getRange(stopRow + 1, 1, lastSheetRow - stopRow, sheet.getLastColumn());
     const footerValues = footerRange.getValues();
-    const cleanedFooter = footerValues.map(row => row.map(cell => (typeof cell === 'number' && cell !== "") ? "" : cell));
+    const cleanedFooter = footerValues.map(row => 
+      row.map(cell => (typeof cell === 'number' && cell !== "") ? "" : cell)
+    );
     footerRange.setValues(cleanedFooter);
   }
 
-  // --- FINAL FORMATTING ---
+  // 7. FINAL FORMATTING
   SpreadsheetApp.flush();
 
-  // 1. Standard numeric format for calculation columns
+  // Numeric Format
   ["P", "Q", "J", "L", "AF", "AI", "AJ", "AG"].forEach(c => {
     sheet.getRange(`${c}${CONFIG.dataStartRow}:${c}${stopRow}`).setNumberFormat("#,##0.00");
   });
 
-  // 2. Percentage format for AH and AK (Percentage with 2 decimal places)
-  ["AH", "AK"].forEach(c => {
+  // Percentage Format
+  ["AH", "AK", "AC"].forEach(c => {
     sheet.getRange(`${c}${CONFIG.dataStartRow}:${c}${stopRow}`).setNumberFormat("0.00%");
   });
 
-  SpreadsheetApp.getActive().toast(`Formula logic and percentage formatting complete for ${tabName}.`, "Success");
+  SpreadsheetApp.getActive().toast(`Logic applied successfully to ${tabName}.`, "Success");
 }
+
+/**
+ * Helper to convert Column Letter to Index
+ */
+function colToIdx(col) {
+  let index = 0;
+  for (let i = 0; i < col.length; i++) {
+    index = index * 26 + (col.charCodeAt(i) - 64);
+  }
+  return index - 1;
+}
+
+/**
+ * FORMULA DEFINITIONS
+ */
+const formulaMapElec = {
+  L: (r) => `=IFERROR((K${r}-J${r})*I${r},"-")`,
+  O: (r) => `=IF(NOT(ISNUMBER($L$5)),"-",$L$5)`,
+  P: (r) => `=IFERROR(IF(O${r}="fix rate","Put/input",ROUND(L${r}*O${r}, 2)),"-")`,
+  Q: (r) => `=IFERROR(ROUND(P${r}*1.12, 2), "-")`,
+  Z: (r) => `=$L$6`,
+  AA: (r) => `=IFERROR(L${r}*Z${r},"-")`,
+  AB: (r) => `=IFERROR(P${r}-AA${r},"-")`,
+  AC: (r) => `=IFERROR((O${r}-Z${r})/Z${r}, "-")`,
+  AG: (r) => `=IFERROR(L${r}-AF${r},"-")`,
+  AH: (r) => `=IFERROR(AG${r}/AF${r},"-")`,
+  AJ: (r) => `=IFERROR(P${r}-AI${r},"-")`,
+  AK: (r) => `=IFERROR(AJ${r}/AI${r},"-")`,
+};
+
+const formulaMapWater = {
+  L: (r) => `=IFERROR(K${r}-J${r}, "-")`,
+  O: (r) => `=IF(NOT(ISNUMBER($L$5)),"-",$L$5)`,
+  P: (r) => `=IFERROR(IF(O${r}="fix rate", "Put/input", ROUND(ROUND(O${r}, 2) * ROUND(L${r}, 2), 2)),"-")`,
+  S: (r) => `=IF(NOT(ISNUMBER($U$10)),"-",$U$10)`,
+  T: (r) => `=IFERROR(S${r}*L${r},"-")`,
+  U: (r) => `=IFERROR(L${r}+T${r},"-")`,
+  V: (r) => `=IF(OR(J${r}="Fix Rate", O${r}="Fix Rate"), "-", IF(AND(ISNUMBER(P${r}), ISNUMBER(S${r})), P${r}*S${r}, "-"))`,
+  W: (r) => `=IFERROR(V${r}+P${r},"-")`,
+  X: (r) => `=IFERROR(IF(J${r}="fix rate", ROUND(P${r}*1.12, 2), ROUND(W${r}*1.12, 2)), "-")`,
+  Z: (r) => `=IF(NOT(ISNUMBER($L$6)),"-",$L$6)`,
+  AA: (r) => `=IFERROR(L${r}*Z${r},"-")`,
+  AB: (r) => `=IFERROR(W${r}-AA${r},"-")`,
+  AC: (r) => `=IFERROR((O${r}-Z${r})/Z${r}, "-")`,
+  AG: (r) => `=IFERROR(L${r}-AF${r},"-")`,
+  AH: (r) => `=IFERROR(AG${r}/AF${r},"-")`,
+  AJ: (r) => `=IFERROR(W${r}-AI${r},"-")`,
+  AK: (r) => `=IFERROR(AJ${r}/AI${r},"-")`,
+};
+
+const formulaMapLPG = {
+  L: (r) => `=IFERROR(K${r}-J${r}, "-")`,
+  M: (r) => `=if(not(isnumber($N$10)),".",$N$10)`,
+  N: (r) => `=iferror(L${r}*M${r},"-")`,
+  O: (r) => `=IF(NOT(ISNUMBER($L$5)),"-",$L$5)`,
+  P: (r) => `=IFERROR(IF(O${r}="fix rate","Put/input", ROUND(N${r}*O${r}, 2)),"-")`,
+  Q: (r) => `=IFERROR(ROUND(P${r}*1.12, 2), "-")`,
+  Z: (r) => `=IF(NOT(ISNUMBER($L$6)),"-",$L$6)`,
+  AA: (r) => `=IFERROR(N${r}*Z${r},"-")`,
+  AB: (r) => `=IFERROR(P${r}-AA${r},"-")`,
+  AC: (r) => `=IFERROR((O${r}-Z${r})/Z${r}, "-")`,
+  AG: (r) => `=IFERROR(N${r}-AF${r},"-")`,
+  AH: (r) => `=IFERROR(AG${r}/AF${r},"-")`,
+  AJ: (r) => `=IFERROR(P${r}-AI${r},"-")`,
+  AK: (r) => `=IFERROR(AJ${r}/AI${r},"-")`,
+};
 /* =================================
 5. TRIGGER WRAPPERS
 ================================= */
