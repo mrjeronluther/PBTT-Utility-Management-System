@@ -9,9 +9,10 @@ function INITIALIZE_SYSTEM_BUTTON() {
   ss.toast("🔄 Syncing databases and checking Ref#...", "System Status", 3);
 
   try {
-    syncDataAcrossFiles();
+    syncDataAcrossFiles();           // Existing DB Sync
+    syncKAData();                    // NEW: Gets data & format for KA_DATA
     generateUniqueAlphanumericRef(); // This function will exit if C7 is already filled.
-    ui.alert("✅ SYSTEM INITIALIZED\n\nDatabase Tabs updated and Ref# verified.");
+    //ui.alert("✅ SYSTEM INITIALIZED\n\nDatabase Tabs updated and Ref# verified.");
   } catch (e) {
     ui.alert("❌ Error during initialization: " + e.message);
   }
@@ -26,8 +27,9 @@ function INSTALL_SYSTEM() {
   
   try {
     // 1. Force immediate data overwrite for data-only tabs
-    syncDataAcrossFiles();
-    
+    syncDataAcrossFiles();           
+    syncKAData(); // Appended fetch into one-time install    
+
     // 2. Try to generate Ref#. If C7 is already filled, this does nothing.
     generateUniqueAlphanumericRef();
 
@@ -41,11 +43,7 @@ function INSTALL_SYSTEM() {
       }
     });
 
-    /* 
-      I REMOVED THE ScriptApp.newTrigger(...) PART HERE
-    */
-
-    ui.alert("🚀 UPDATE COMPLETE\n\n- Tabs 'dvPeriod' and 'dvGen' overwritten.\n- Ref# is secured in cell C7.\n- On-open startup sequence has been REMOVED.");
+    ui.alert("🚀 UPDATE COMPLETE\n\n- Tabs 'dvPeriod', 'dvGen', and 'KA_DATA' overwritten.\n- Ref# is secured in cell C7.");
     
   } catch (e) {
     ui.alert("❌ Action Failed: " + e.message);
@@ -57,7 +55,66 @@ function INSTALL_SYSTEM() {
  */
 function runStartupSequence() {
   syncDataAcrossFiles();
+  syncKAData(); 
   generateUniqueAlphanumericRef();
+}
+
+/**
+ * NEW FUNCTION: SYNC DATA & FORMATTING TO "KA_DATA"
+ * Grabs ALL values and number formatting (dates, %, etc) and overwrites "KA_DATA"
+ */
+function syncKAData() {
+  const sourceId = "1jY-9FMha3x972o4Gz1d6DVD36d3ppjHW_WM1DHJz6ag";
+  const targetSS = SpreadsheetApp.getActiveSpreadsheet(); 
+
+  const lock = LockService.getScriptLock();
+  try {
+    if (!lock.tryLock(15000)) throw new Error("Database is busy during KA_DATA update."); 
+
+    // Open Source Spreadsheet & Tab
+    const sourceSS = SpreadsheetApp.openById(sourceId);
+    const sourceSheet = sourceSS.getSheetByName("Data");
+    
+    // Safety check - Ensures Source Data Tab actually exists
+    if (!sourceSheet) return;
+
+    // Connect to KA_DATA Tab (or auto-create if missing)
+    let targetSheet = targetSS.getSheetByName("KA_DATA");
+    if (!targetSheet) {
+      targetSheet = targetSS.insertSheet("KA_DATA");
+    }
+
+    const sourceRange = sourceSheet.getDataRange();
+    
+    // FETCH BOTH VALUES AND FORMATS (Percentage, Dates, Decimals, etc.)
+    const sourceData = sourceRange.getValues();
+    const sourceFormats = sourceRange.getNumberFormats(); 
+    
+    const numRows = sourceData.length;
+    
+    if (numRows > 0) {
+      const numCols = sourceData[0].length;
+      
+      // Wipe target before rewrite
+      targetSheet.clear(); 
+      
+      // Expand tab capacity exactly to the Source's limits
+      if (targetSheet.getMaxRows() < numRows) {
+        targetSheet.insertRowsAfter(targetSheet.getMaxRows(), numRows - targetSheet.getMaxRows());
+      }
+      if (targetSheet.getMaxColumns() < numCols) {
+        targetSheet.insertColumnsAfter(targetSheet.getMaxColumns(), numCols - targetSheet.getMaxColumns());
+      }
+
+      // Feed full dataset cleanly over into target, THEN apply the format rules
+      const targetRange = targetSheet.getRange(1, 1, numRows, numCols);
+      targetRange.setValues(sourceData);            // Copies raw numbers/strings
+      targetRange.setNumberFormats(sourceFormats);  // Applies the %, Date, Text formulas
+    }
+    SpreadsheetApp.flush();
+  } finally {
+    if (lock.hasLock()) lock.releaseLock();
+  }
 }
 
 /**
@@ -68,7 +125,6 @@ function syncDataAcrossFiles() {
   const sourceId = "1hMMUd4ho50HP63dc2fRAo--iK-m7YotamkKtsDGT_Us";
   const targetSS = SpreadsheetApp.getActiveSpreadsheet(); 
   
-  // Define only the specific tabs meant to be overwritten
   const tabsToSync = ["dvPeriod", "dvGen"]; 
   const timeZone = Session.getScriptTimeZone();
 
@@ -89,7 +145,7 @@ function syncDataAcrossFiles() {
         const numCols = sourceData[0].length;
         
         if (numRows > 0) {
-          // Date Formatting
+          // Legacy Date Formatting mapped here manually
           if (numRows > 1) { 
             for (let i = 1; i < numRows; i++) {
               if (sourceData[i][0] instanceof Date) sourceData[i][0] = Utilities.formatDate(sourceData[i][0], timeZone, "MMM d, yyyy");
@@ -100,8 +156,6 @@ function syncDataAcrossFiles() {
             }
           }
 
-          // FULL OVERWRITE: This ONLY affects dvPeriod or dvGen.
-          // Cell C7 on Instructions sheet remains safe.
           targetSheet.clear(); 
           
           if (targetSheet.getMaxRows() < numRows) targetSheet.insertRowsAfter(targetSheet.getMaxRows(), numRows - targetSheet.getMaxRows());
@@ -128,8 +182,6 @@ function generateUniqueAlphanumericRef() {
   const cell = instSheet.getRange("C7");
   const existingRef = cell.getValue().toString().trim();
   
-  // SAFETY GATE: If the cell has any value at all, stop everything.
-  // This ensures the Ref# is only generated ONCE per file life cycle.
   if (existingRef !== "" && existingRef !== null) {
     console.log("Ref# already exists. Generation skipped to prevent overwrite.");
     return; 
@@ -158,7 +210,6 @@ function generateUniqueAlphanumericRef() {
       if (!existingRefs.has(newRef)) isUnique = true;
     }
     
-    // Final check before setting
     if (cell.getValue().toString().trim() === "") {
        cell.setValue(newRef);
     }
