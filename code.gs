@@ -1248,7 +1248,25 @@ function recordActivePBTT() {
               return; 
             }
 
-            // 3. UPDATED Checker for Col P: 
+          // 3. New Checker for Col L: Cannot be negative
+                      if (colLetter === "L") {
+                        let numVal = Number(cellValue);
+                        // We check if it's a number and if it's strictly less than 0
+                        if (!isNaN(numVal) && numVal < 0) {
+                          ui.alert(
+                            `🚫 INVALID CONSUMPTION\n\n` +
+                            `Tab: [${tabName}]\n` +
+                            `Row: ${i + startRow}\n` +
+                            `Column: L\n\n` +
+                            `Value (${cellValue}) cannot be a negative number.\n` +
+                            `Please check if the Current Reading is lower than the Previous Reading.`
+                          );
+                          return; // Block submission
+                        }
+                      }
+
+
+            // 4. UPDATED Checker for Col P: 
             // - ALLOWED completely if it contains "%".
             // - If NO "%", it MUST be a valid number and CANNOT be exactly 0.
             if (colLetter === "P") {
