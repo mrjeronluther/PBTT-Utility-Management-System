@@ -1,13 +1,129 @@
 /* =================================
 CONFIGURATION & MAPPING
 ================================= */
-const PBTT_DB_ID    = "1hMMUd4ho50HP63dc2fRAo--iK-m7YotamkKtsDGT_Us";
-const BACKUP_REGISTRY_ID = "10-ywOh509BNRMd0C-Mb8b5gibbu62D_K8U8cWYcV59U"; 
+const PBTT_DB_ID = "1hMMUd4ho50HP63dc2fRAo--iK-m7YotamkKtsDGT_Us";
+const BACKUP_REGISTRY_ID = "10-ywOh509BNRMd0C-Mb8b5gibbu62D_K8U8cWYcV59U";
 const BACKUP_FOLDER_ID = "1aokNFrCuVdLWs4AylG7LNekCtfQ5B1-p";
 const CELL_LIMIT_MAX = 10000000; // Google's absolute limit (10M)
 const CELL_ROTATION_LIMIT = 8000000; // Accurate threshold to trigger rotation (80%)
 
+/**
+ * Helper to check if a Property Name qualifies for validation bypass.
+ * Bypasses: "CT - Capital Town" and "MG - Maple Grove"
+ */
+function isBypassedProperty(propertyName) {
+  if (!propertyName) return false;
+  const clean = superClean(propertyName);
+  const bypassKeywords = ["capital town", "maple grove"];
+  return bypassKeywords.some(keyword => clean.includes(keyword));
+}
 
+/**
+ * Strict helper to match user Property Name to Master File Tab Name.
+ * Enforces that if PROPERTY contains "MREIT", the TAB must also contain "MREIT".
+ */
+function isPropertyAndTabMatch(userProperty, tabName) {
+  if (!userProperty || !tabName) return false;
+  const cleanProp = superClean(userProperty);
+  const cleanTab = superClean(tabName);
+  if (!cleanProp || !cleanTab) return false;
+
+  const propHasMreit = cleanProp.includes("mreit");
+  const tabHasMreit = cleanTab.includes("mreit");
+
+  // RULE: If Property contains MREIT, the Tab MUST also contain MREIT (and vice-versa)
+  if (propHasMreit !== tabHasMreit) {
+    return false;
+  }
+
+  // Handle MREIT specific abbreviations
+  if (propHasMreit) {
+    if ((cleanProp.includes("iloilo") || cleanProp.includes("ilo")) && 
+        (cleanTab.includes("iloilo") || cleanTab.includes("ilo"))) return true;
+
+    if ((cleanProp.includes("eastwood") || cleanProp.includes("ew")) && 
+        (cleanTab.includes("eastwood") || cleanTab.includes("ew"))) return true;
+
+    if ((cleanProp.includes("mckinley") || cleanProp.includes("mkh")) && 
+        (cleanTab.includes("mckinley") || cleanTab.includes("mkh"))) return true;
+
+    return cleanTab === cleanProp || cleanTab.includes(cleanProp) || cleanProp.includes(cleanTab);
+  }
+
+  // Standard non-MREIT tab matching
+  return cleanTab === cleanProp || cleanTab.includes(cleanProp) || cleanProp.includes(cleanTab);
+}
+
+/**
+ * Helper to map special Property Names to their designated Tab Names in the master file.
+ * - MREIT EASTWOOD -> MREIT_EW
+ * - MREIT MCKINLEY -> MREIT_MKH
+ * - MREIT ILOILO   -> MREIT_ILO
+ */
+function getSpecialPropertyTabName(propertyName) {
+  if (!propertyName) return null;
+  const clean = superClean(propertyName);
+  if (clean.includes("mreit")) {
+    if (clean.includes("eastwood") || clean.includes("ew")) return "MREIT_EW";
+    if (clean.includes("mckinley") || clean.includes("mkh")) return "MREIT_MKH";
+    if (clean.includes("iloilo") || clean.includes("ilo")) return "MREIT_ILO";
+  }
+  return null;
+}
+
+/**
+ * Helper to scan all three utility tabs to collect a set of base tenant names
+ * that have been tagged with "_Affiliates" in any sheet.
+ */
+function getGlobalAffiliates() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const tabs = ["Elec", "Water", "LPG"];
+  const affiliates = new Set();
+
+  tabs.forEach(tabName => {
+    const sheet = ss.getSheetByName(tabName);
+    if (!sheet) return;
+    const lastRow = sheet.getLastRow();
+    if (lastRow < CONFIG.dataStartRow) return;
+
+    const colEIndex = colToIdx("E") + 1;
+    const data = sheet.getRange(CONFIG.dataStartRow, colEIndex, lastRow - CONFIG.dataStartRow + 1, 1).getValues();
+    
+    data.forEach(row => {
+      const valE = String(row[0] || "").trim();
+      if (valE.includes('_')) {
+        const parts = valE.split('_');
+        const suffix = parts.pop().trim().toLowerCase();
+        if (suffix === "affiliates") {
+          const baseName = parts.join('_').trim().toLowerCase();
+          if (baseName) {
+            affiliates.add(baseName);
+          }
+        }
+      }
+    });
+  });
+  return affiliates;
+}
+
+/**
+ * Helper to verify if the user is attempting to run functions on the master template.
+ * Blocks execution and prompts the user to make a copy.
+ */
+function isMasterFileBlocked() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const masterTemplateId = "1MS_GtdErDFaxI8ZLjIsTFTK4oWXrf2ULapKjwp_qCWw";
+  
+  if (ss.getId() === masterTemplateId) {
+    SpreadsheetApp.getUi().alert(
+      "⚠️ Action Blocked on Master File",
+      "This is the master template file. You must make a copy of this spreadsheet (File > Make a copy) first before running any setups, formulas, or utilities.",
+      SpreadsheetApp.getUi().ButtonSet.OK
+    );
+    return true; // Blocked
+  }
+  return false; // Not blocked
+}
 
 const CONFIG = {
   headerRow: 12,
@@ -19,13 +135,13 @@ const CONFIG = {
 const FETCH_MAPS = {
   "Elec": {
     "J": "K",   // target col : source col
-    "AF": "L",  
-    "AI": "P"   
+    "AF": "L",
+    "AI": "P"
   },
   "Water": {
     "J": "K",
-    "AF": "L", 
-    "AI": "W"  
+    "AF": "L",
+    "AI": "W"
   },
   "LPG": {
     "J": "K",
@@ -36,9 +152,9 @@ const FETCH_MAPS = {
 
 // COLUMNS TO BE LEFT BLANK DURING FETCH (To be filled by Run Formula)
 const EXCLUSIONS = {
-  "Elec": ["K", "L", "O", "P", "Q", "Z", "AA", "AB", "AC", "AG", "AH", "AJ", "AK"],
-  "Water": ["K", "L", "O", "P", "Q", "S","T", "U", "V", "W", "X", "Z", "AA", "AB", "AC", "AG", "AH", "AJ", "AK"],
-  "LPG": ["K", "L", "O", "P", "M","N","Q", "Z", "AA", "AB", "AC", "AG", "AH", "AJ", "AK"]
+  "Elec": ["K", "L", "O", "P", "Q", "Z", "AA", "AB", "AC", "AG", "AH", "AJ", "AK","AD"],
+  "Water": ["K", "L", "O", "P", "Q", "S", "T", "U", "V", "W", "X", "Z", "AA", "AB", "AC", "AG", "AH", "AJ", "AK","AD"],
+  "LPG": ["K", "L", "O", "P", "M", "N", "Q", "Z", "AA", "AB", "AC", "AG", "AH", "AJ", "AK","AD"]
 };
 
 /* =================================
@@ -49,100 +165,110 @@ function onOpen() {
   ui.createMenu("Utility Manager")
     .addItem("🛠️ Setup", "INSTALL_SYSTEM")
     .addSubMenu(ui.createMenu("⚡ Electricity")
-        .addItem("1. Fetch Data", "masterFetchElec") // Points to wrapper
-        .addItem("2. Run Formulas", "runFormulaElec"))
+      .addItem("1. Fetch Data", "masterFetchElec")
+      .addItem("2. Run Formulas", "runFormulaElec"))
 
     .addSubMenu(ui.createMenu("💧 Water")
-        .addItem("1. Fetch Data", "masterFetchWater") // Points to wrapper
-        .addItem("2. Run Formulas", "runFormulaWater"))
+      .addItem("1. Fetch Data", "masterFetchWater")
+      .addItem("2. Run Formulas", "runFormulaWater"))
 
     .addSubMenu(ui.createMenu("🔥 LPG")
-        .addItem("1. Fetch Data", "masterFetchLPG") // Points to wrapper
-        .addItem("2. Run Formulas", "runFormulaLPG"))
+      .addItem("1. Fetch Data", "masterFetchLPG")
+      .addItem("2. Run Formulas", "runFormulaLPG"))
 
     .addSeparator()
-    .addItem("🔍 Scan All Tabs (Elec, Water, LPG)", "scanAllTabs")
-    .addItem("📤 Submit Active PBTT", "recordActivePBTT") 
-    
+    .addItem("📤 Submit Active PBTT", "recordActivePBTT")
+
     .addToUi();
 }
 
-
-// Wrapper for Electricity
 function masterFetchElec() {
-  INITIALIZE_SYSTEM_BUTTON(); // Function 1: Sync & Ref#
-  fetchElec();                // Function 2: The actual fetch
+  INITIALIZE_SYSTEM_BUTTON();
+  fetchElec();
 }
-// Wrapper for Water
 function masterFetchWater() {
-  fetchWater();               // Function 2
+  fetchWater();
 }
-// Wrapper for LPG
 function masterFetchLPG() {
-  fetchLPG();                // Function 2
+  fetchLPG();
 }
 
-/* =================================
-   2. SCAN WRAPPER & LOG CLEANING
-================================= */
 function scanAllTabs() {
+  if (isMasterFileBlocked()) return false;
+
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const tabsToScan = ["Elec", "Water", "LPG"];
-  
-  // --- 1. REQUIREMENT CHECKER (New Fix) ---
+
+  const extData = getExternalValidationData();
+  if (!extData) {
+    SpreadsheetApp.getUi().alert("🚫 Validation Error: Could not download external validation data. Scan halted and submission blocked.");
+    return false;
+  }
+
+  // --- 1. REQUIREMENT CHECKER ---
   const requirements = {
-    "Elec":  { config: ["L5", "L6"], cols: ["L","O","P","Q","Z","AA","AB","AC","AG","AH","AJ","AK"] },
-    "Water": { config: ["L5", "L6", "U10"], cols: ["L","O","P","S","T","U","V","W","X","Z","AA","AB","AC","AG","AH","AJ","AK"] },
-    "LPG":   { config: ["L5", "L6", "N10"], cols: ["L","M","N","O","P","Q","Z","AA","AB","AC","AG","AH","AJ","AK"] }
+    "Elec": { config: ["L5", "L6"], cols: ["L", "O", "P", "Q", "Z", "AA", "AB", "AC", "AG", "AH", "AJ", "AK"] },
+    "Water": { config: ["L5", "L6", "U10"], cols: ["L", "O", "P", "S", "T", "U", "V", "W", "X", "Z", "AA", "AB", "AC", "AG", "AH", "AJ", "AK"] },
+    "LPG": { config: ["L5", "L6", "N10"], cols: ["L", "M", "N", "O", "P", "Q", "Z", "AA", "AB", "AC", "AG", "AH", "AJ", "AK"] }
   };
 
   let stopErrors = [];
-  
+
   tabsToScan.forEach(tabName => {
     let sheet = ss.getSheetByName(tabName);
     if (!sheet) return;
-    
+
     let missing = [];
     const req = requirements[tabName];
-    
-    // Set boundaries for our rows based on your CONFIG and the sheet's current size
-    const startRow = CONFIG.dataStartRow;
-    const lastRow = Math.max(startRow, sheet.getLastRow()); 
-    
-    // Get all values for Column E to efficiently see which rows are populated
-    // (Start row, column 5=E, number of rows down, 1 column wide)
-    const colEData = sheet.getRange(startRow, 5, lastRow - startRow + 1, 1).getValues();
-    
-    let configsChecked = false; // Flag to ensure we don't redundantly check static config cells
 
-    // Loop through every single row
-    colEData.forEach((row, idx) => {
+    const startRow = CONFIG.dataStartRow;
+    const lastRow = Math.max(startRow, sheet.getLastRow());
+
+    const colEAndADData = sheet.getRange(startRow, 5, lastRow - startRow + 1, 26).getValues();
+
+    let configsChecked = false;
+
+    colEAndADData.forEach((row, idx) => {
       let colEValue = row[0];
+      let valAD = String(row[25] || "").trim();
       let actualRow = startRow + idx;
-      
-      // ONLY trigger the requirement check if Column E HAS A VALUE
+
       if (colEValue !== "") {
-        
-        // 1. Check Configuration cells (We only need to alert about these once per sheet)
+        if (valAD.toUpperCase() === "MONITORING") return;
+
         if (!configsChecked) {
-          req.config.forEach(c => { 
-            if(sheet.getRange(c).getValue() === "") missing.push(`Cell ${c}`); 
+          req.config.forEach(c => {
+            if (sheet.getRange(c).getValue() === "") missing.push(`Cell ${c}`);
           });
           configsChecked = true;
         }
-        
-        // 2. Check the specific column requirements for this exact row
-        req.cols.forEach(col => { 
-          // Reads: (e.g.) sheet.getRange("L" + 10).getValue()
-          if(sheet.getRange(col + actualRow).getValue() === "") {
-            // Log as L10, P12, etc., so the user knows exactly which row failed
-            missing.push(`${col}${actualRow}`); 
-          } 
+
+        // Check if Column J is THEORETICAL
+        let valJ = String(sheet.getRange("J" + actualRow).getValue() || "").trim().toUpperCase();
+        let colsToCheck = req.cols.slice();
+
+        if (valJ === "THEORETICAL") {
+          // Do not require Col L for Elec, Water, and LPG
+          colsToCheck = colsToCheck.filter(c => c !== "L");
+
+          if (tabName === "Elec") {
+            // Elec: Col P is required
+            if (!colsToCheck.includes("P")) colsToCheck.push("P");
+          } else if (tabName === "Water" || tabName === "LPG") {
+            // Water and LPG: Col O is required, do not require L-dependent columns
+            if (!colsToCheck.includes("O")) colsToCheck.push("O");
+            colsToCheck = colsToCheck.filter(c => !["P", "S", "T", "U", "V", "W", "X", "M", "N"].includes(c));
+          }
+        }
+
+        colsToCheck.forEach(col => {
+          if (sheet.getRange(col + actualRow).getValue() === "") {
+            missing.push(`${col}${actualRow}`);
+          }
         });
       }
     });
-    
-    // Group and add error alerts per tab if anything was found
+
     if (missing.length > 0) {
       stopErrors.push(`[${tabName}]: ${missing.join(", ")}`);
     }
@@ -150,7 +276,7 @@ function scanAllTabs() {
 
   if (stopErrors.length > 0) {
     SpreadsheetApp.getUi().alert("🚫 SCAN CANCELLED - DATA MISSING\n\n" + stopErrors.join("\n\n"));
-    return;
+    return false;
   }
 
   // --- 2. CLEAR LOGS ---
@@ -161,18 +287,43 @@ function scanAllTabs() {
     if (s.getLastRow() === 0) s.appendRow(["Timestamp", "Tab", "Cell", "Column Label", "Error Message", "Remarks"]);
   });
 
+  // --- 2.1 VALIDATE INSTRUCTIONS CELL C24 AGAINST MASTER TAB NAMES (WITH BYPASS) ---
+  const instSheet = ss.getSheetByName("Instructions");
+  if (instSheet && extData && extData.propertyTabs) {
+    const c24Val = String(instSheet.getRange("C24").getValue() || "").trim();
+    const timestamp = Utilities.formatDate(new Date(), ss.getSpreadsheetTimeZone(), "MMM d, yyyy");
+    const basicAnomaliesSheet = ss.getSheetByName("Basic Anomalies");
+
+    if (c24Val === "") {
+      basicAnomaliesSheet.appendRow([timestamp, "Instructions", "C24", "Property Selection", "Instructions cell C24 is empty.", "Please input property selection"]);
+    } else if (!isBypassedProperty(c24Val)) {
+      const isMatch = extData.propertyTabs.some(tabName => isPropertyAndTabMatch(c24Val, tabName));
+      if (!isMatch) {
+        basicAnomaliesSheet.appendRow([
+          timestamp, 
+          "Instructions", 
+          "C24", 
+          "Property Selection", 
+          `Property "${c24Val}" does not match any Tab Name in master file.`, 
+          "Tab Name lookup failed in file 12OOOzMVeWPb6SKJyNu3tewSPKrbu3s93jJA3SmPNSY4"
+        ]);
+      }
+    }
+  }
+
   // --- 3. RUN SCANS SILENTLY ---
   tabsToScan.forEach(tabName => {
-    scanTab(tabName, false); // Make sure your scanTab has the alerts REMOVED as shown below
+    scanTab(tabName, false, extData); 
   });
 
   // --- 4. SHOW FINAL SUMMARY MODAL ---
   const stdTotal = Math.max(0, ss.getSheetByName("Basic Anomalies").getLastRow() - 1);
   const kaTotal = Math.max(0, ss.getSheetByName("Client Rate Anomalies").getLastRow() - 1);
   showScanSuccessModal(tabsToScan, stdTotal, kaTotal);
+
+  return (stdTotal === 0 && kaTotal === 0);
 }
 
-// Function for the Modal Pop up
 function showScanSuccessModal(scannedTabs, totalStd, totalKA) {
   const htmlContent = `
     <html>
@@ -198,7 +349,6 @@ function showScanSuccessModal(scannedTabs, totalStd, totalKA) {
   SpreadsheetApp.getUi().showModalDialog(htmlOutput, "System Update");
 }
 
-
 /* =================================
 2. HELPER: COL LETTER TO INDEX
 ================================= */
@@ -207,22 +357,19 @@ function colToIdx(letter) {
   for (let i = 0; i < letter.length; i++) {
     column += (letter.charCodeAt(i) - 64) * Math.pow(26, letter.length - i - 1);
   }
-  return column - 1; 
+  return column - 1;
 }
-
-
 
 /* =================================
 3. FETCH DATA (DYNAMIC MAPPING)
 ================================= */
 function fetchDataOnly(tabName) {
+  if (isMasterFileBlocked()) return;
+
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const ui = SpreadsheetApp.getUi();
-  
-  // ==========================================
-  // 1. DATABASE VALIDATION (Check REF #)
-  // ==========================================
-  const masterDbId = "1hMMUd4ho50HP63dc2fRAo--iK-m7YotamkKtsDGT_Us"; 
+
+  const masterDbId = "1hMMUd4ho50HP63dc2fRAo--iK-m7YotamkKtsDGT_Us";
   const props = PropertiesService.getScriptProperties();
   const activeDB_ID = props.getProperty("ACTIVE_DB_ID") || masterDbId;
 
@@ -233,7 +380,7 @@ function fetchDataOnly(tabName) {
   }
 
   const currentRef = instructionSheet.getRange("C7").getValue().toString().trim();
-  
+
   if (currentRef === "") {
     ui.alert("❌ ERROR: Cell C7 in 'Instructions' tab is empty. Please enter a Reference Number first.");
     return;
@@ -242,7 +389,7 @@ function fetchDataOnly(tabName) {
   try {
     const dbSs = SpreadsheetApp.openById(activeDB_ID);
     const subTab = dbSs.getSheetByName("PBTT Submission");
-    
+
     if (subTab) {
       const lastDbRow = subTab.getLastRow();
       if (lastDbRow > 1) {
@@ -255,7 +402,7 @@ function fetchDataOnly(tabName) {
             `You cannot use this file more than 1.\n\n` +
             `Make a copy of the file "(Master) BTT Template" instead.`
           );
-          return; // STOP EXECUTION
+          return;
         }
       }
     }
@@ -264,88 +411,79 @@ function fetchDataOnly(tabName) {
     ui.alert("⚠️ Database connection warning: Could not verify Reference Status.");
   }
 
-  // ==========================================
-  // EXISTING FETCH LOGIC (With source linkage safeguards)
-  // ==========================================
   const sheet = ss.getSheetByName(tabName);
   if (!sheet) return;
 
-  const dataStartRow = 13; 
+  const dataStartRow = 13;
 
   const sourceLink = sheet.getRange("A1").getValue();
-  if (!sourceLink) { 
-    ui.alert("Paste SOURCE LINK in cell C7 in Instructions Tab (or ensure A1 references it)."); 
-    return; 
+  if (!sourceLink) {
+    ui.alert("Paste SOURCE LINK in cell C7 in Instructions Tab (or ensure A1 references it).");
+    return;
   }
 
   let sourceSS;
-  try { 
-    sourceSS = SpreadsheetApp.openByUrl(sourceLink); 
-  } catch (e) { 
-    ui.alert("Cannot open source link."); 
-    return; 
+  try {
+    sourceSS = SpreadsheetApp.openByUrl(sourceLink);
+  } catch (e) {
+    ui.alert("Cannot open source link.");
+    return;
   }
 
   if (sourceSS.getId() === ss.getId()) {
     ui.alert("FETCH CANCELLED: You are using the current spreadsheet's URL. Please use an external source link.");
     return;
   }
-  
+
   const sourceSheet = sourceSS.getSheetByName(tabName);
-  if (!sourceSheet) { 
-    ui.alert(`Tab "${tabName}" not found in source.`); 
-    return; 
+  if (!sourceSheet) {
+    ui.alert(`Tab "${tabName}" not found in source.`);
+    return;
   }
 
   const lastSourceRow = sourceSheet.getLastRow();
-  const lastSourceCol = Math.max(sourceSheet.getLastColumn(), 29); 
+  const lastSourceCol = Math.max(sourceSheet.getLastColumn(), 29);
   if (lastSourceRow < dataStartRow) return;
 
   const rawData = sourceSheet.getRange(dataStartRow, 1, lastSourceRow - dataStartRow + 1, lastSourceCol).getValues();
 
-  // --- STAGE 2: PROCESSING ---
-  if (sheet.getMaxColumns() < 29) {
-    sheet.insertColumnsAfter(sheet.getMaxColumns(), 29 - sheet.getMaxColumns());
+  // Ensure the sheet has at least 38 columns (up to Column AL)
+  if (sheet.getMaxColumns() < 38) {
+    sheet.insertColumnsAfter(sheet.getMaxColumns(), 38 - sheet.getMaxColumns());
   }
 
-  const destWidth = sheet.getMaxColumns(); 
+  const destWidth = sheet.getMaxColumns();
   const pasteArray = [];
-  
-  // Requires global variables: EXCLUSIONS, FETCH_MAPS, colToIdx externally defined!
+
   const skipIndices = (EXCLUSIONS[tabName] || []).map(letter => colToIdx(letter));
   const mapping = FETCH_MAPS[tabName] || {};
 
   let totalFound = false;
-  let rowCounter = 0; 
+  let rowCounter = 0;
 
-  // --- 1. Identify the *Absolute Last* TOTAL row by looping from bottom to top ---
   let lastTotalIndex = -1;
   for (let i = rawData.length - 1; i >= 0; i--) {
     let checkVal = String(rawData[i][0] || "").trim().toLowerCase();
     let isSub = checkVal.includes("subtotal") || checkVal.includes("sub-total") || checkVal.includes("sub total");
-    
-    // Grabs final bottom match:
+
     if (checkVal.includes("total") && !isSub) {
       lastTotalIndex = i;
-      break; 
+      break;
     }
   }
 
-  // --- 2. Iterate array pulling everything systematically into destRows mapping ---
   for (let i = 0; i < rawData.length; i++) {
     let sourceRow = rawData[i];
     let valA_source = String(sourceRow[0] || "").trim();
     let valA_lower = valA_source.toLowerCase();
-    
+
     let isSubTotal = valA_lower.includes("subtotal") || valA_lower.includes("sub-total") || valA_lower.includes("sub total");
-    let isTerminatingTotal = (i === lastTotalIndex); 
+    let isTerminatingTotal = (i === lastTotalIndex);
     let isIntermediateTotal = (!isTerminatingTotal && valA_lower.includes("total") && !isSubTotal);
 
     let rowHasData = sourceRow.some(cell => String(cell).trim() !== "");
-    
+
     if (rowHasData || isSubTotal || isIntermediateTotal || isTerminatingTotal) {
-      
-      // Inject aesthetic space/gap above Final Terminating row
       if (isTerminatingTotal) {
         if (pasteArray.length > 0 && !pasteArray[pasteArray.length - 1].every(cell => cell === "")) {
           pasteArray.push(new Array(destWidth).fill(""));
@@ -353,22 +491,19 @@ function fetchDataOnly(tabName) {
       }
 
       let destRow = new Array(destWidth).fill("");
-      
-      // Assing Label Name in Column 1 naturally
+
       if (isSubTotal || isIntermediateTotal || isTerminatingTotal) {
-        destRow[0] = valA_source; 
+        destRow[0] = valA_source;
       } else {
         rowCounter++;
-        destRow[0] = rowCounter; 
+        destRow[0] = rowCounter;
       }
 
-      // Loop directly through and filter
       for (let c = 1; c < sourceRow.length; c++) {
         if (skipIndices.includes(c)) continue;
         if (c < destWidth) destRow[c] = sourceRow[c];
       }
 
-      // Explicit target mappings applying uniformly
       Object.keys(mapping).forEach(targetCol => {
         let sIdx = colToIdx(mapping[targetCol]);
         let tIdx = colToIdx(targetCol);
@@ -378,27 +513,22 @@ function fetchDataOnly(tabName) {
       pasteArray.push(destRow);
     }
 
-    // BREAK SCRIPT LOGIC & ATTACH FOOTER 
-    // Wait until mapping is finished inside the array cleanly before stopping it and writing the footprint
     if (isTerminatingTotal) {
       totalFound = true;
-      
-      for (let s = 0; s < 3; s++) pasteArray.push(new Array(destWidth).fill("")); // Sign spaces
-
+      for (let s = 0; s < 3; s++) pasteArray.push(new Array(destWidth).fill(""));
       let sigRow = new Array(destWidth).fill("");
       sigRow[0] = "Prepared By:"; sigRow[7] = "Checked By:"; sigRow[28] = "Noted By:";
       pasteArray.push(sigRow);
-      break; 
+      break;
     }
   }
 
-  // Check fallback protocol incase data lacked standard totals universally 
-  if (!totalFound) { 
+  if (!totalFound) {
     if (pasteArray.length > 0 && !pasteArray[pasteArray.length - 1].every(cell => cell === "")) {
-       pasteArray.push(new Array(destWidth).fill(""));
+      pasteArray.push(new Array(destWidth).fill(""));
     }
     let dummyTotalRow = new Array(destWidth).fill("");
-    dummyTotalRow[0] = "TOTAL"; 
+    dummyTotalRow[0] = "TOTAL";
     pasteArray.push(dummyTotalRow);
     for (let s = 0; s < 3; s++) pasteArray.push(new Array(destWidth).fill(""));
     let dummySig = new Array(destWidth).fill("");
@@ -406,7 +536,6 @@ function fetchDataOnly(tabName) {
     pasteArray.push(dummySig);
   }
 
-  // --- FINAL STEP: AUTO-CLEAR ROW 13+, PASTE, AND ALIGN ---
   const maxRows = sheet.getMaxRows();
   const maxCols = sheet.getMaxColumns();
   const rowsToClear = maxRows - dataStartRow + 1;
@@ -414,39 +543,35 @@ function fetchDataOnly(tabName) {
   if (rowsToClear > 0) {
     sheet.getRange(dataStartRow, 1, rowsToClear, maxCols).clearContent();
   }
-  
+
   if (pasteArray.length > 0) {
     const destinationRange = sheet.getRange(dataStartRow, 1, pasteArray.length, destWidth);
     destinationRange.setValues(pasteArray);
     destinationRange.setHorizontalAlignment("center");
     destinationRange.setVerticalAlignment("middle");
   }
-  
+
   SpreadsheetApp.getActive().toast(`Fetch complete. Mapped Columns apply flawlessly to intermediate totals. Unused trailing data ignored.`, "Success", 5);
 }
 
 /* =================================
-4. RUN FORMULAS (FULL UPDATED VERSION)
+4. RUN FORMULAS
 ================================= */
-
-// Tab-specific columns to be summed in Subtotal and Total rows
 const sumColsELEC = ["L", "N", "P", "Q", "AA", "AB", "AF", "AG", "AI", "AJ"];
 const sumColsWAT = ["L", "N", "P", "Q", "X", "AA", "AB", "AF", "AG", "AI", "AJ"];
 const sumColsLPG = ["L", "N", "P", "Q", "AA", "AB", "AF", "AG", "AI", "AJ"];
 
-/**
- * Main function to apply formulas and logic based on the Tab Name
- */
 function applyFormulasToSheet(tabName) {
+  if (isMasterFileBlocked()) return;
+
   const ss = SpreadsheetApp.getActive();
   const sheet = ss.getSheetByName(tabName);
-  
+
   if (!sheet) {
     SpreadsheetApp.getUi().alert(`Sheet "${tabName}" not found.`);
     return;
   }
 
-  // 1. MANDATORY VALIDATIONS
   const valL5 = sheet.getRange("L5").getValue();
   const valL6 = sheet.getRange("L6").getValue();
 
@@ -460,7 +585,6 @@ function applyFormulasToSheet(tabName) {
     return;
   }
 
-  // 2. DETERMINE ACTIVE SETTINGS BASED ON TAB
   let activeMap;
   let activeSumCols;
 
@@ -481,12 +605,10 @@ function applyFormulasToSheet(tabName) {
       return;
     }
   } else {
-    // Default to Electricity
     activeMap = formulaMapElec;
     activeSumCols = sumColsELEC;
   }
 
-  // 3. IDENTIFY DATA RANGE AND STOP ROW (TOTAL ROW)
   const lastRow = sheet.getLastRow();
   const fullDataA = sheet.getRange(1, 1, lastRow, 1).getValues();
   const colEIdx = colToIdx("E");
@@ -500,17 +622,14 @@ function applyFormulasToSheet(tabName) {
     }
   }
 
-  // 4. APPLY ROW-BY-ROW FORMULAS
   for (let i = CONFIG.dataStartRow - 1; i < stopRow; i++) {
     const r = i + 1;
     const labelA = String(fullDataA[i][0]).toLowerCase().trim();
     const valE = String(fullDataE[i][0]).trim();
 
-    // Skip if row is a total/subtotal row or column E is empty
     if (labelA.includes("total")) continue;
 
     if (valE === "") {
-      // Clear row content if ID/Name in column E is missing
       sheet.getRange(r, 1, 1, 35).clearContent();
       continue;
     }
@@ -524,7 +643,6 @@ function applyFormulasToSheet(tabName) {
 
     let targetCols = Object.keys(activeMap);
 
-    // Skip formula injection if cells contain manual overrides
     if (valO !== "") targetCols = targetCols.filter(c => c !== "O");
     if (valP !== "" && valP !== "Put/input") targetCols = targetCols.filter(c => c !== "P");
     if (valZ !== "") targetCols = targetCols.filter(c => c !== "Z");
@@ -537,7 +655,6 @@ function applyFormulasToSheet(tabName) {
     });
   }
 
-  // 5. APPLY SUBTOTAL AND TOTAL FORMULAS (TAB-SPECIFIC)
   let sectionStartRow = CONFIG.dataStartRow;
   let subTotalRowsFound = [];
 
@@ -570,26 +687,26 @@ function applyFormulasToSheet(tabName) {
     }
   }
 
-  // 6. CLEAN FOOTER (Area below the Total row)
   const lastSheetRow = sheet.getLastRow();
   if (lastSheetRow > stopRow) {
     const footerRange = sheet.getRange(stopRow + 1, 1, lastSheetRow - stopRow, sheet.getLastColumn());
     const footerValues = footerRange.getValues();
-    const cleanedFooter = footerValues.map(row => 
+    const cleanedFooter = footerValues.map(row =>
       row.map(cell => (typeof cell === 'number' && cell !== "") ? "" : cell)
     );
     footerRange.setValues(cleanedFooter);
   }
 
-  // 7. FINAL FORMATTING
   SpreadsheetApp.flush();
 
-  // Numeric Format
-  ["P", "Q", "J", "L", "AF", "AI", "AJ", "AG"].forEach(c => {
+  ["P", "Q", "AF", "AI", "AJ", "AG"].forEach(c => {
     sheet.getRange(`${c}${CONFIG.dataStartRow}:${c}${stopRow}`).setNumberFormat("#,##0.00");
   });
 
-  // Percentage Format
+  ["J", "K", "L"].forEach(c => {
+    sheet.getRange(`${c}${CONFIG.dataStartRow}:${c}${stopRow}`).setNumberFormat("#,##0.0000");
+  });
+
   ["AH", "AK", "AC"].forEach(c => {
     sheet.getRange(`${c}${CONFIG.dataStartRow}:${c}${stopRow}`).setNumberFormat("0.00%");
   });
@@ -597,20 +714,6 @@ function applyFormulasToSheet(tabName) {
   SpreadsheetApp.getActive().toast(`Logic applied successfully to ${tabName}.`, "Success");
 }
 
-/**
- * Helper to convert Column Letter to Index
- */
-function colToIdx(col) {
-  let index = 0;
-  for (let i = 0; i < col.length; i++) {
-    index = index * 26 + (col.charCodeAt(i) - 64);
-  }
-  return index - 1;
-}
-
-/**
- * FORMULA DEFINITIONS
- */
 const formulaMapElec = {
   L: (r) => `=IFERROR((K${r}-J${r})*I${r},"-")`,
   O: (r) => `=IF(NOT(ISNUMBER($L$5)),"-",$L$5)`,
@@ -662,6 +765,7 @@ const formulaMapLPG = {
   AJ: (r) => `=IFERROR(P${r}-AI${r},"-")`,
   AK: (r) => `=IFERROR(AJ${r}/AI${r},"-")`,
 };
+
 /* =================================
 5. TRIGGER WRAPPERS
 ================================= */
@@ -684,22 +788,25 @@ function scanLPGTab() { scanTab("LPG"); }
 6. UTILITIES (CLEANED UP)
 ================================= */
 function clearTabData(tabName) {
+  if (isMasterFileBlocked()) return;
+
   const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(tabName);
   if (sheet && sheet.getLastRow() >= CONFIG.dataStartRow) {
     sheet.getRange(CONFIG.dataStartRow, 1, sheet.getLastRow() - CONFIG.dataStartRow + 1, sheet.getMaxColumns()).clearContent();
   }
 }
 
-
-
 /* =================================
-6. FINAL SCAN TAB (Standardized Conditions)
+7. FINAL SCAN TAB
 ================================= */
-
-function scanTab(tabName, shouldClearLogs = true) {
+function scanTab(tabName, shouldClearLogs = true, extData = null) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = ss.getSheetByName(tabName);
   if (!sheet) return;
+
+  if (!extData) {
+    extData = getExternalValidationData();
+  }
 
   const lastRow = sheet.getLastRow();
   if (lastRow < CONFIG.dataStartRow) return;
@@ -714,14 +821,16 @@ function scanTab(tabName, shouldClearLogs = true) {
   const standardLogSheet = setupLogSheet("Basic Anomalies");
   const kaLogSheet = setupLogSheet("Client Rate Anomalies");
 
-  const dataRange = sheet.getRange(CONFIG.dataStartRow, 1, lastRow - CONFIG.dataStartRow + 1, 37);
+  const scanCols = Math.max(sheet.getLastColumn(), 38);
+  const dataRange = sheet.getRange(CONFIG.dataStartRow, 1, lastRow - CONFIG.dataStartRow + 1, scanCols);
   const dataValues = dataRange.getValues();
-  const headers = sheet.getRange(CONFIG.headerRow, 1, 1, 37).getValues()[0];
+  const headers = sheet.getRange(CONFIG.headerRow, 1, 1, scanCols).getValues()[0];
   const valL5 = sheet.getRange("L5").getValue();
   const valL6 = sheet.getRange("L6").getValue();
   const rawE4 = sheet.getRange("E4").getValue();
-  
-  const kaRefMap = getKAData(); 
+
+  const kaRefMap = getKAData();
+  const globalAffiliates = getGlobalAffiliates(); 
   const issueLogs = [];
   const kaLogs = [];
 
@@ -736,34 +845,40 @@ function scanTab(tabName, shouldClearLogs = true) {
     const rowNum = CONFIG.dataStartRow + i;
     const row = dataValues[i];
 
-    // Read column E and A values first
     const valE = String(row[colToIdx("E")] || "").trim();
     const labelA = String(row[0] || "").trim();
-    
-    // --- NEW: STRICT COLUMN E SKIP LOGIC ---
-    // If Column E is empty, skip to the next row immediately
+
     if (valE === "") continue;
 
-    // Continue to ignore "Total" rows at the bottom
     const normalizedLabelA = labelA.toLowerCase().replace(/[^a-z]/g, "");
     if (normalizedLabelA.includes("total")) continue;
 
-    // --- STEP 1: RUN CHECKLIST (Now safely checking ONLY valid rows) ---
-    runCommonChecklist(row, rowNum, (r, c, m, res, arr) => logHelper(row, r, c, m, res, arr), valL5, valL6);
+    const valAD = String(row[colToIdx("AD")] || "").trim();
+    if (valAD.toUpperCase() === "MONITORING") {
+      const valP = row[colToIdx("P")];
+      const isZeroP = (valP === 0 || String(valP).trim() === "0" || (!isNaN(valP) && Number(valP) === 0 && String(valP).trim() !== ""));
+      
+      // If REMARKS is MONITORING and Column P is 0, record as an anomaly
+      if (isZeroP) {
+        logHelper(row, rowNum, "P", 'Cannot use "MONITORING" in Remarks when Column P is 0');
+      }
+      continue;
+    }
+
+    // --- STEP 1: RUN CHECKLIST (Pass tabName for theoretical checks) ---
+    runCommonChecklist(row, rowNum, (r, c, m, res, arr) => logHelper(row, r, c, m, res, arr), valL5, valL6, globalAffiliates, tabName);
 
     // --- STEP 2: KA VALIDATION ---
     if (kaRefMap) {
       const valF = String(row[colToIdx("F")] || "").trim().toUpperCase();
       const valG = String(row[colToIdx("G")] || "").trim().toUpperCase();
-      const hasKA = (valF === "KA" || valG === "KA");
+      const hasKA = (valF === "KA" || valF === "KA&SR" || valG === "KA");
 
-      // Check Database for Match
       const matchedKey = findReferenceKey(valE, kaRefMap);
       const validCategories = matchedKey ? kaRefMap[matchedKey] : [];
-      const headerE4 = superClean(rawE4); 
+      const headerE4 = superClean(rawE4);
       let isMatch = false;
 
-      // Determine if Site Identity (E4) matches Category assigned to Tenant
       if (validCategories.length > 0) {
         for (let k = 0; k < validCategories.length; k++) {
           let keyword = superClean(validCategories[k]);
@@ -774,7 +889,6 @@ function scanTab(tabName, shouldClearLogs = true) {
         }
       }
 
-      // Logic check: Calculation result vs Manual "KA" flag
       if (isMatch) {
         if (!hasKA) logHelper(row, rowNum, "F", 'user need to put "KA"', `DB match: [${valE}]`, kaLogs);
       } else {
@@ -783,25 +897,177 @@ function scanTab(tabName, shouldClearLogs = true) {
     }
 
     // --- STEP 3: TAB SPECIFIC CALCULATIONS ---
-    switch(tabName) {
-      case "Elec":
-        if (!(typeof row[colToIdx("Q")] === 'number' && row[colToIdx("Q")] > 0)) logHelper(row, rowNum, "Q", "Amount should be a number > 0");
-        break;
-      case "Water":
-        ["S", "T", "U", "V", "W"].forEach(c => { if (String(row[colToIdx(c)]).trim() === "") logHelper(row, rowNum, c, "Formula output missing"); });
-        if (!(typeof row[colToIdx("X")] === 'number' && row[colToIdx("X")] > 0)) logHelper(row, rowNum, "X", "VAT amount missing");
-        break;
-      case "LPG":
-        const vL = row[colToIdx("L")];
-        if (typeof vL === 'number') {
-          if (!(typeof row[colToIdx("M")] === 'number' && row[colToIdx("M")] > 0)) logHelper(row, rowNum, "M", "Multiplier missing");
-          if (!(typeof row[colToIdx("N")] === 'number' && row[colToIdx("N")] > 0)) logHelper(row, rowNum, "N", "Consumption amount error");
+    const valJ_Row = String(row[colToIdx("J")] || "").trim().toUpperCase();
+    const isRowTheo = (valJ_Row === "THEORETICAL");
+
+    switch (tabName) {
+      case "Elec": {
+        const valAD_Q = String(row[colToIdx("AD")] || "").trim().toLowerCase();
+        const skipQ = valAD_Q.includes("inaccesible meter") || valAD_Q.includes("inaccessible meter") || valAD_Q.includes("minimal usage");
+        if (!skipQ) {
+          if (!(typeof row[colToIdx("Q")] === 'number' && row[colToIdx("Q")] > 0)) logHelper(row, rowNum, "Q", "Amount should be a number > 0");
         }
         break;
+      }
+      case "Water": {
+        if (!isRowTheo) {
+          ["S", "T", "U", "V", "W"].forEach(c => { if (String(row[colToIdx(c)]).trim() === "") logHelper(row, rowNum, c, "Formula output missing"); });
+          const valAD_X = String(row[colToIdx("AD")] || "").trim().toLowerCase();
+          const skipX = valAD_X.includes("inaccesible meter") || valAD_X.includes("inaccessible meter") || valAD_X.includes("minimal usage");
+          if (!skipX) {
+            if (!(typeof row[colToIdx("X")] === 'number' && row[colToIdx("X")] > 0)) logHelper(row, rowNum, "X", "VAT amount missing");
+          }
+        }
+        break;
+      }
+      case "LPG": {
+        if (!isRowTheo) {
+          const vL = row[colToIdx("L")];
+          const valAD_LPG = String(row[colToIdx("AD")] || "").trim().toLowerCase();
+          const skipLPG = valAD_LPG.includes("inaccesible meter") || valAD_LPG.includes("inaccessible meter") || valAD_LPG.includes("minimal usage");
+          if (typeof vL === 'number' && !skipLPG) {
+            if (!(typeof row[colToIdx("M")] === 'number' && row[colToIdx("M")] > 0)) logHelper(row, rowNum, "M", "Multiplier missing");
+            if (!(typeof row[colToIdx("N")] === 'number' && row[colToIdx("N")] > 0)) logHelper(row, rowNum, "N", "Consumption amount error");
+          }
+        }
+        break;
+      }
+    }
+
+    // --- STEP 4: EXTERNAL VALIDATION (Match Property Tab First, then Columns) ---
+    if (extData && extData.ss) {
+      let userProperty = String(sheet.getRange("E4").getValue() || "").trim();
+      if (!userProperty) {
+        const iSheet = ss.getSheetByName("Instructions");
+        if (iSheet) userProperty = String(iSheet.getRange("C24").getValue() || "").trim();
+      }
+
+      const cleanProp = superClean(userProperty);
+
+      // BYPASS: Skip external checks if property is Capital Town or Maple Grove
+      if (!isBypassedProperty(userProperty)) {
+
+        if (cleanProp && !extData.cache[cleanProp]) {
+          let matchedSheet = null;
+          const allSheets = extData.ss.getSheets();
+          for (let s of allSheets) {
+            if (isPropertyAndTabMatch(userProperty, s.getName())) {
+              matchedSheet = s;
+              break;
+            }
+          }
+
+          if (matchedSheet) {
+            const extLastRow = matchedSheet.getLastRow();
+            if (extLastRow >= 3) {
+              const extHeaders = matchedSheet.getRange(2, 1, 1, matchedSheet.getLastColumn()).getValues()[0];
+              let tenantCol = -1;
+              let codeCol = -1;
+              let propCol = -1;
+
+              for (let c = 0; c < extHeaders.length; c++) {
+                const hClean = superClean(extHeaders[c]);
+                if (hClean === "property" || hClean.includes("property")) propCol = c;
+                if (hClean === "tenant name" || hClean.includes("tenant name")) tenantCol = c;
+                if (hClean === "customer code" || hClean.includes("customer code")) codeCol = c;
+              }
+
+              if (tenantCol !== -1 && codeCol !== -1) {
+                const extRows = matchedSheet.getRange(3, 1, extLastRow - 2, matchedSheet.getLastColumn()).getValues();
+                const records = extRows.map(r => ({
+                  property: (propCol !== -1) ? String(r[propCol] || "").trim() : matchedSheet.getName(),
+                  tenantName: String(r[tenantCol] || "").trim(),
+                  customerCode: String(r[codeCol] || "").trim()
+                })).filter(r => r.tenantName || r.customerCode);
+
+                extData.cache[cleanProp] = { sheetName: matchedSheet.getName(), records: records, hasPropCol: (propCol !== -1), valid: true };
+              } else {
+                extData.cache[cleanProp] = { sheetName: matchedSheet.getName(), error: "Missing 'TENANT NAME' or 'CUSTOMER CODE' in Row 2 headers.", valid: false };
+              }
+            } else {
+              extData.cache[cleanProp] = { sheetName: matchedSheet.getName(), error: "Property tab has no data in Row 3+.", valid: false };
+            }
+          } else {
+            extData.cache[cleanProp] = { error: `No Tab matching Property "${userProperty}" in master file.`, valid: false };
+          }
+        }
+
+        const propData = extData.cache[cleanProp];
+
+        if (!propData || !propData.valid) {
+          logHelper(row, rowNum, "E", propData ? propData.error : `Property "${userProperty}" tab not found in master file.`);
+        } else {
+          let partnerColIdx = -1;
+          let codeColIdx = -1;
+          for (let c = 0; c < headers.length; c++) {
+            const hClean = superClean(headers[c]);
+            if (hClean.includes("retail partner") || hClean.includes("tenant name")) partnerColIdx = c;
+            if (hClean.includes("tenant code") || hClean.includes("customer code")) codeColIdx = c;
+          }
+          if (partnerColIdx === -1) partnerColIdx = colToIdx("E");
+
+          const alScanIdx = colToIdx("AL");
+          const userRetailPartner = String(row[partnerColIdx] || "").trim();
+          
+          // Strictly read Tenant Code from Column AL (or dynamic TENANT CODE header)
+          let userTenantCode = String(row[alScanIdx] !== undefined && row[alScanIdx] !== null ? row[alScanIdx] : "").trim();
+          if (!userTenantCode && codeColIdx !== -1) {
+            userTenantCode = String(row[codeColIdx] || "").trim();
+          }
+
+          let basePartner = userRetailPartner;
+          if (userRetailPartner.includes('_')) {
+            const parts = userRetailPartner.split('_');
+            if (parts[parts.length - 1].trim().toLowerCase() === "affiliates") {
+              basePartner = parts.slice(0, -1).join('_').trim();
+            }
+          }
+
+          const cleanPartner = superClean(userRetailPartner);
+          const cleanBase = superClean(basePartner);
+          const cleanCode = superClean(userTenantCode);
+
+          const partnerExists = propData.records.some(rec => {
+            const cRec = superClean(rec.tenantName);
+            return cRec && (cRec === cleanPartner || cRec === cleanBase);
+          });
+
+          const codeExists = propData.records.some(rec => {
+            const cRec = superClean(rec.customerCode);
+            return cRec && cRec === cleanCode;
+          });
+
+          if (!partnerExists) {
+            logHelper(row, rowNum, "E", `RETAIL PARTNER "${userRetailPartner}" does not exist in master Tab "${propData.sheetName}" under TENANT NAME.`);
+          }
+          if (!codeExists) {
+            logHelper(row, rowNum, "AL", `TENANT CODE "${userTenantCode}" does not exist in master Tab "${propData.sheetName}" under CUSTOMER CODE.`);
+          }
+
+          if (partnerExists && codeExists) {
+            const pairExists = propData.records.some(rec => {
+              const cRecTenant = superClean(rec.tenantName);
+              const cRecCode = superClean(rec.customerCode);
+              const tMatch = cRecTenant && (cRecTenant === cleanPartner || cRecTenant === cleanBase);
+              const cMatch = cRecCode && cRecCode === cleanCode;
+              return tMatch && cMatch;
+            });
+
+            if (!pairExists) {
+              logHelper(
+                row, 
+                rowNum, 
+                "E", 
+                `Binding mismatch: RETAIL PARTNER "${userRetailPartner}" and TENANT CODE "${userTenantCode}" are not paired together in Tab "${propData.sheetName}".`, 
+                `Property Tab Row Pairing Invalid`
+              );
+            }
+          }
+        }
+      }
     }
   }
 
-  // --- WRITE TO LOGS ---
   if (issueLogs.length > 0) {
     const sIdx = standardLogSheet.getLastRow() + 1;
     standardLogSheet.getRange(sIdx, 1, issueLogs.length, 6).setValues(issueLogs);
@@ -828,7 +1094,7 @@ function findReferenceKey(cellValue, kaRefMap) {
 }
 
 /* =================================
-   OTHER HELPERS (KEEP EXISTING)
+   OTHER HELPERS
 ================================= */
 function superClean(val) {
   if (!val) return "";
@@ -837,14 +1103,6 @@ function superClean(val) {
   return str;
 }
 
-
-/**
- * Maps Column B to an array of valid Column C values.
- * Allows one property to have multiple valid categories.
- */
-/**
- * Maps Column B AND Column E (iterations) to Column C values.
- */
 function getKAData() {
   const KA_REF_URL = "https://docs.google.com/spreadsheets/d/1jY-9FMha3x972o4Gz1d6DVD36d3ppjHW_WM1DHJz6ag/edit";
   try {
@@ -855,35 +1113,30 @@ function getKAData() {
     const lastR = sheet.getLastRow();
     if (lastR < 2) return {};
 
-    // Get 5 columns: A (0), B (1), C (2), D (3), E (4)
-    const rawData = sheet.getRange(2, 1, lastR - 1, 5).getValues(); 
+    const rawData = sheet.getRange(2, 1, lastR - 1, 5).getValues();
     const propertyMap = {};
 
     for (let i = 0; i < rawData.length; i++) {
       const row = rawData[i];
-      
-      const valA = String(row[0] || "").trim();      // ID (Col A)
-      const valB = String(row[1] || "").trim();      // Main Name (Col B)
-      const valE = String(row[4] || "").trim();      // Iterations (Col E)
-      const category = superClean(row[2]);           // Category (Col C)
-      
+
+      const valA = String(row[0] || "").trim();
+      const valB = String(row[1] || "").trim();
+      const valE = String(row[4] || "").trim();
+      const category = superClean(row[2]);
+
       const currentRowNum = i + 2;
 
-      // --- ADDED CHECKER PER REQUEST ---
-      // Specifically checks if Col E has data but Col A does not
       if (valE !== "" && valA === "") {
         const specificMsg = `🛑 MASTER DATABASE ERROR (Row ${currentRowNum})\n\nColumn E contains values, but Column A is blank. You must input a number first in Column A of the Master File to proceed.`;
         SpreadsheetApp.getUi().alert(specificMsg);
         throw new Error("Aborted: Missing number in Master Column A.");
       }
 
-      // Maintain general safety for Col B as well
       if (valB !== "" && valA === "") {
         const errorMsg = `🛑 MASTER DATABASE ERROR\n\nRow ${currentRowNum} has a Main Name (Col B) but is missing an Identifier in Column A.\n\nPlease fix the Master File to proceed.`;
         SpreadsheetApp.getUi().alert(errorMsg);
         throw new Error("Master Data Violation: Missing Column A.");
       }
-      // ---------------------------------
 
       const addKey = (name) => {
         let cleanedName = superClean(name);
@@ -898,88 +1151,173 @@ function getKAData() {
     return propertyMap;
 
   } catch (e) {
-    // Re-throw if it's one of our validation errors to ensure the whole scan stops
     if (e.message.includes("Aborted") || e.message.includes("Violation")) throw e;
-    
     console.error("KA Ref Error: " + e.message);
     return null;
   }
 }
 
-
 /* =================================
 REFACTORED: THE "COMMON" CHECKLIST (ALL TABS)
 ================================= */
-function runCommonChecklist(row, rNum, log, L5, L6) {
-  // Helper to fetch value by Column Letter
+function runCommonChecklist(row, rNum, log, L5, L6, globalAffiliates = new Set(), tabName = "") {
   const get = (colLetter) => row[colToIdx(colLetter)];
-  
-  // Clean values for Column A and Column E
+
   const valA = String(get("A") || "").trim();
   const valE = String(get("E") || "").trim();
-  
-  // --- MANDATORY IDENTIFIER CHECK (HARD STOP) ---
-  // If Column E (Tenant) is populated, Column A (No. or Area) MUST have a value.
+
+  const valAD = String(get("AD") || "").trim();
+  if (valAD.toUpperCase() === "MONITORING") {
+    return;
+  }
+
+  const currentTenant = valE.toLowerCase().trim();
+  const currentBase = valE.includes('_') ? valE.split('_').slice(0, -1).join('_').trim().toLowerCase() : currentTenant;
+  const isAffiliate = (valE.includes('_') && valE.split('_').pop().trim().toLowerCase() === "affiliates") || globalAffiliates.has(currentBase);
+
   if (valE !== "" && valA === "") {
     const errorMsg = `CRITICAL DATA ERROR\n\nRow ${rNum} has a Tenant Name in Column E ("${valE}") but the identifier in Column A is blank.\n\nPROCESS HALTED: Every tenant must have an Row Number in Column A to continue.`;
-    
     SpreadsheetApp.getUi().alert(errorMsg);
     throw new Error(`Execution stopped at row ${rNum}: Missing Col A with populated Col E.`);
   }
 
+  const valJ_Val = String(get("J") || "").trim().toUpperCase();
+  const isTheo = (valJ_Val === "THEORETICAL");
 
-  // --- STANDARD CALCULATION CHECKS ---
   const valL = get("L");
   const L_isHyphen = (String(valL).trim() === "-");
-  
-  // Run logic ONLY if Col E has an entry
-  if (valE !== "") {
 
-    // J, K, L Conditions: Ensure mandatory reading/results are present
-    ["J", "K", "L"].forEach(c => {
+  if (valE !== "") {
+    // If Column J is THEORETICAL, do not require Column L
+    const mandatoryReadingCols = isTheo ? ["J", "K"] : ["J", "K", "L"];
+    mandatoryReadingCols.forEach(c => {
       if (String(get(c)).trim() === "") log(rNum, c, "Should not be blank if E has entry");
     });
 
-    // Column O Conditions: Billing Rate
+    // Check specific requirements for THEORETICAL
+    if (isTheo) {
+      if (tabName === "Elec" && String(get("P")).trim() === "") {
+        log(rNum, "P", "Column P is required when Column J is THEORETICAL");
+      }
+      if ((tabName === "Water" || tabName === "LPG") && String(get("O")).trim() === "") {
+        log(rNum, "O", "Column O is required when Column J is THEORETICAL");
+      }
+    }
+
+    const valF = String(get("F") || "").trim().toUpperCase();
+    const valG = String(get("G") || "").trim().toUpperCase();
+    const hasKA = (valF === "KA" || valF === "KA&SR" || valG === "KA");
+    const hasSR = (valF === "SR" || valF === "KA&SR" || valG === "SR");
+
+    const allowedFValues = ["KA", "SR", "REG", "KA&SR"];
+    if (!allowedFValues.includes(valF)) {
+      log(rNum, "F", "Column F must be \"KA\", \"SR\", \"REG\", or \"KA&SR\" when Column E has a value");
+    }
+
     const valO = get("O");
     const oStr = String(valO).toLowerCase().trim();
     const oIsFixOrTheo = (oStr === "fix rate" || oStr === "theoretical");
 
-    if (typeof valO === 'number') {
-      if (!(valO > 0)) log(rNum, "O", "Should equal to L5, \"fix rate\" or \"theoretical\"");
-      if (!L_isHyphen && valO !== L5) log(rNum, "O", "Should equal to L5, or if L= \"-\" then, O= \"fix rate\" or O=\"theoretical\"");
-    } else {
-      if (!oIsFixOrTheo) log(rNum, "O", "Should equal to L5, \"fix rate\" or \"theoretical\"");
-      if (L_isHyphen && !oIsFixOrTheo) log(rNum, "O", "Should equal to L5, or if L= \"-\" then, O= \"fix rate\" or O=\"theoretical\"");
+    if (hasKA) {
+      if (typeof valO === 'number') {
+        if (!(valO > 0)) {
+          log(rNum, "O", "KA Billing Rate must be a valid positive number, \"fix rate\" or \"theoretical\"");
+        }
+      } else {
+        if (!oIsFixOrTheo) {
+          log(rNum, "O", "KA Billing Rate must be a valid positive number, \"fix rate\" or \"theoretical\"");
+        }
+      }
+    } else if (hasSR) {
+      if (typeof valO === 'number') {
+        if (!(valO >= L6)) {
+          log(rNum, "O", "SR Billing Rate must not be less than L6 (Previous Rate)");
+        }
+      } else {
+        if (!oIsFixOrTheo) {
+          log(rNum, "O", "SR Billing Rate must be a valid number not less than L6, \"fix rate\" or \"theoretical\"");
+        }
+      }
+    } else if (!isAffiliate) {
+      if (typeof valO === 'number') {
+        if (!(valO > 0)) log(rNum, "O", "Should equal to L5, \"fix rate\" or \"theoretical\"");
+        if (!L_isHyphen && valO !== L5) log(rNum, "O", "Should equal to L5, or if L= \"-\" then, O= \"fix rate\" or O=\"theoretical\"");
+      } else {
+        if (!oIsFixOrTheo) log(rNum, "O", "Should equal to L5, \"fix rate\" or \"theoretical\"");
+        if (L_isHyphen && !oIsFixOrTheo) log(rNum, "O", "Should equal to L5, or if L= \"-\" then, O= \"fix rate\" or O=\"theoretical\"");
+      }
     }
 
-    // Column P Condition: Basic Amount
-    if (!(typeof get("P") === 'number' && get("P") > 0)) log(rNum, "P", "Should be a number >0");
+    // Column P Condition: Required for standard rows, or Elec when THEORETICAL
+    if (!isTheo || tabName === "Elec") {
+      const valP = get("P");
+      const valAD_P = String(get("AD") || "").trim().toLowerCase();
+      
+      // Case-insensitive check for allowed remarks (including common variants)
+      const allowedRemarks = [
+        "defective meter",
+        "inaccessible meter",
+        "inaccesible meter",
+        "very minimal usage",
+        "minimal usage"
+      ];
+      const hasAllowedRemark = allowedRemarks.some(kw => valAD_P.includes(kw));
+      const isZeroValue = (valP === 0 || String(valP).trim() === "0" || (!isNaN(valP) && Number(valP) === 0 && String(valP).trim() !== ""));
 
-    // Column Z Conditions: Reference/Comparative Rate
+      // If value is 0 and remarks qualify, exclude from anomalies
+      if (isZeroValue && hasAllowedRemark) {
+        // Excluded from anomalies
+      } else {
+        if (!(typeof valP === 'number' && valP > 0)) {
+          log(rNum, "P", "Should be a number >0");
+        }
+      }
+    }
+
     const valZ = get("Z");
     if (valZ === "") log(rNum, "Z", "Should be a number >0, \"fix rate\" or \"theoretical\"");
     if (typeof valZ === 'number' && !L_isHyphen && valZ !== L6) {
       log(rNum, "Z", "Should equal to L6, or if L= \"-\" then, O= \"fix rate\" or O=\"theoretical\"");
     }
 
-    // Standard Formula Output Verification (Columns driven by Formulas)
     ["AA", "AB", "AC", "AG", "AJ"].forEach(c => {
       if (String(get(c)).trim() === "") log(rNum, c, "Should not be empty (c/o fx)");
     });
 
-    // Multi-period Consistency (Source Column Comparisons)
     ["AF", "AI"].forEach(c => {
       if (String(get(c)).trim() === "") log(rNum, c, "Should not be empty if E has entry");
     });
 
-    // Variances / Consumption Flags: Alerts if >30% change (AH=Vol variance, AK=Cost variance)
-    ["AH", "AK"].forEach(c => {
-      const v = get(c);
-      if (typeof v === 'number') {
-        if (v > 0.3 || v < -0.3) log(rNum, c, "Variance alert: Value is outside +/- 30% threshold.");
-      }
-    });
+    const valAD_Exp = String(get("AD") || "").trim();
+    const cleanAD = valAD_Exp.toLowerCase().replace(/[^a-z0-9]/g, "");
+    
+    const placeholderBlacklist = [
+      "na", "none", "nil", "notapplicable", "notaplicable", "no", "ok", "okay",
+      "test", "testing", "tbd", "tbc", "noted", "done", "noneed", "notneeded",
+      "nocomment", "noidea", "nothing", "yes", "asdf"
+    ];
+
+    const isPlaceholder = placeholderBlacklist.includes(cleanAD);
+    const isLongEnough = cleanAD.length >= 5;
+
+    const hasValidExplanation = (valAD_Exp !== "" && !isPlaceholder && isLongEnough);
+
+    if (!hasValidExplanation) {
+      ["AH", "AK"].forEach(c => {
+        const v = get(c);
+        if (typeof v === 'number') {
+          if (v > 0.3 || v < -0.3) {
+            let errorMsg = "Variance alert: Value is outside +/- 30% threshold.";
+            if (valAD_Exp === "") {
+              errorMsg = "Variance alert: High variance detected (+/- 30%). Please provide an explanation in Column AD.";
+            } else if (isPlaceholder || !isLongEnough) {
+              errorMsg = "Variance alert: Incomplete explanation. Please describe the specific reason for this variance in Column AD.";
+            }
+            log(rNum, c, errorMsg);
+          }
+        }
+      });
+    }
   }
 }
 
@@ -987,54 +1325,42 @@ function confirmFetchOverwrite(tabName) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = ss.getSheetByName(tabName);
   const ui = SpreadsheetApp.getUi();
-  
+
   if (!sheet) return false;
 
   const lastSheetRow = sheet.getLastRow();
   let hasExistingData = false;
 
-  // 1. Only bother checking if the sheet has rows up to or past the dataStartRow
   if (lastSheetRow >= CONFIG.dataStartRow) {
-    // 2. Fetch all values specifically in Column E (index 5)
     const colE_values = sheet.getRange(CONFIG.dataStartRow, 5, lastSheetRow - CONFIG.dataStartRow + 1, 1).getValues();
-    
-    // 3. Smart check: Ignore blanks, unchecked boxes (false), null, and empty spaces
     hasExistingData = colE_values.some(row => {
       const val = row[0];
       if (val === "" || val === null || val === undefined || val === false) return false;
-      return String(val).trim() !== ""; // Returns true ONLY if real data exists
+      return String(val).trim() !== "";
     });
   }
 
-  // 4. Show modal ONLY if we confirmed there's actual data in Col E
   if (hasExistingData) {
     const res = ui.alert(
-      'Confirm Overwrite', 
-      `Data already exists in "${tabName}". Overwrite?`, 
+      'Confirm Overwrite',
+      `Data already exists in "${tabName}". Overwrite?`,
       ui.ButtonSet.YES_NO
     );
-    // Return false if they click NO or close the dialog
-    if (res !== ui.Button.YES) return false; 
+    if (res !== ui.Button.YES) return false;
   }
 
-  // 5. Proceed as normal if there is no data OR if they clicked YES
   return true;
 }
 
-
-
-/**
- * RE-INITIALIZATION: 
- * If you ever need to reset to the original file, 
- * run the "resetDatabaseID" function at the bottom.
- */
-
-
+/* =================================
+8. RECORD & SUBMIT ACTIVE PBTT
+================================= */
 function recordActivePBTT() {
+  if (isMasterFileBlocked()) return;
+
   const lock = LockService.getScriptLock();
   try {
-    // Wait for up to 30 seconds for other processes to finish.
-    lock.waitLock(30000); 
+    lock.waitLock(30000);
   } catch (e) {
     SpreadsheetApp.getUi().alert("Server Busy. Please try again.");
     return;
@@ -1042,17 +1368,26 @@ function recordActivePBTT() {
 
   try {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
-    // ⚠️ ID of the Master Database
-    const masterDbId = "1hMMUd4ho50HP63dc2fRAo--iK-m7YotamkKtsDGT_Us"; 
-
-    // Define the specific columns to check for each tab
-    const tabValidationMaps = {
-      "Elec":  ["B","C","D","H","I","J","K","L","O","P","Q","Y","Z","AA","AB","AC","AG","AH","AJ","AK"],
-      "Water": ["B","C","D","H","J","K","L","O","P","S","T","U","V","W","X","Y","Z","AA","AB","AC","AG","AH","AJ","AK"],
-      "LPG":   ["B","C","D","H","J","K","L","M","N","O","P","Q","Y","Z","AA","AB","AC","AG","AH","AJ","AK"]
-    };
-
     const ui = SpreadsheetApp.getUi();
+
+    // 1. RUN SYSTEM SCAN TO DETECT ANOMALIES PRIOR TO SUBMITTING
+    const isClean = scanAllTabs();
+    if (!isClean) {
+      ui.alert(
+        "🚫 SUBMISSION BLOCKED\n\n" +
+        "Anomalies or configuration gaps were discovered during the system scan.\n\n" +
+        "Please inspect the 'Basic Anomalies' and 'Client Rate Anomalies' logs, resolve all items, and attempt submission again."
+      );
+      return;
+    }
+
+    const masterDbId = "1hMMUd4ho50HP63dc2fRAo--iK-m7YotamkKtsDGT_Us";
+
+const tabValidationMaps = {
+      "Elec": ["B", "D", "F", "H", "I", "J", "K", "L", "O", "P", "Q", "Y", "Z", "AA", "AB", "AC", "AG", "AH", "AJ", "AK", "AL"],
+      "Water": ["B", "D", "F", "H", "J", "K", "L", "O", "P", "S", "T", "U", "V", "W", "X", "Y", "Z", "AA", "AB", "AC", "AG", "AH", "AJ", "AK", "AL"],
+      "LPG": ["B", "D", "F", "H", "J", "K", "L", "M", "N", "O", "P", "Q", "Y", "Z", "AA", "AB", "AC", "AG", "AH", "AJ", "AK", "AL"]
+    };
 
     // ===============================================
     // 1. REF# & DATE SETUP
@@ -1063,23 +1398,20 @@ function recordActivePBTT() {
       return;
     }
 
-    // Ref Check (C7)
     const currentRef = instSheet.getRange("C7").getValue().toString().trim();
     if (currentRef === "") {
       ui.alert("❌ ERROR: No Reference Number found in 'Instructions' tab C7.");
       return;
     }
 
-    // Get Target Dates (C26, C27)
     const rawTargetStart = instSheet.getRange("C26").getValue();
     const rawTargetEnd = instSheet.getRange("C27").getValue();
 
-    // Helper to normalize dates (strip time) for accurate comparison
     const normalizeDate = (d) => {
       if (!d || !(d instanceof Date) || isNaN(d.getTime())) return null;
       const n = new Date(d);
-      n.setHours(0, 0, 0, 0); // Reset time to midnight
-      return n.getTime(); // Use numeric time for easy comparison
+      n.setHours(0, 0, 0, 0);
+      return n.getTime();
     };
 
     const targetStartInfo = normalizeDate(rawTargetStart);
@@ -1091,67 +1423,52 @@ function recordActivePBTT() {
     }
 
     // ===============================================
-    // 2. PERIOD STATUS VALIDATION (Match C26/C27 + Check Lock & Bypass)
+    // 2. PERIOD STATUS VALIDATION
     // ===============================================
     const dbPeriodTab = "dvPeriod";
     let periodFound = false;
     let periodIsActive = false;
-    let periodIsLocked = false; 
+    let periodIsLocked = false;
     let lockDateFormatted = "";
 
     try {
       const dbSs = SpreadsheetApp.openById(masterDbId);
       const periodSheet = dbSs.getSheetByName(dbPeriodTab);
       const periodData = periodSheet.getDataRange().getValues();
-      
+
       const today = new Date();
       today.setHours(0, 0, 0, 0);
 
-      // Iterate DB to find the specific period in C26/C27
       for (let i = 1; i < periodData.length; i++) {
         const row = periodData[i];
-        
-        // Col A (Start) & Col B (End)
         const dbStart = normalizeDate(row[0]);
         const dbEnd = normalizeDate(row[1]);
 
-        // MATCH FOUND?
         if (dbStart === targetStartInfo && dbEnd === targetEndInfo) {
           periodFound = true;
-          
-          // 1. Check Status (Col D)
           const status = String(row[3]).trim();
           if (status === "Active") {
             periodIsActive = true;
           }
 
-          // 2. Check Lock Date (Col C) & Bypass (Col E)
           if (row[2]) {
-             const lockDate = new Date(row[2]);
-             lockDate.setHours(0,0,0,0);
-             
-             // Get Bypass Value from Column E (Index 4)
-             const bypassTag = String(row[4] || "").trim();
+            const lockDate = new Date(row[2]);
+            lockDate.setHours(0, 0, 0, 0);
+            const bypassTag = String(row[4] || "").trim();
 
-             // Logic: If Today >= Lock Date
-             if (today >= lockDate) {
-               if (bypassTag === "Bypass") {
-                 // ALLOWED: Bypass is active, ignore lock.
-                 periodIsLocked = false; 
-               } else {
-                 // BLOCKED: Lock date met and NO Bypass tag.
-                 periodIsLocked = true;
-                 lockDateFormatted = Utilities.formatDate(lockDate, "Asia/Manila", "MMM d, yyyy");
-               }
-             }
+            if (today >= lockDate) {
+              if (bypassTag === "Bypass") {
+                periodIsLocked = false;
+              } else {
+                periodIsLocked = true;
+                lockDateFormatted = Utilities.formatDate(lockDate, "Asia/Manila", "MMM d, yyyy");
+              }
+            }
           }
-          break; // Stop looking once the matching period is found
+          break;
         }
       }
 
-      // -- VALIDATE FINDINGS --
-      
-      // Error 1: Dates don't match any row in DB
       if (!periodFound) {
         ui.alert(
           "🚫 CONFIGURATION ERROR\n\n" +
@@ -1161,7 +1478,6 @@ function recordActivePBTT() {
         return;
       }
 
-      // Error 2: Period found but marked Inactive/Closed
       if (!periodIsActive) {
         ui.alert(
           "🚫 SUBMISSION BLOCKED\n\n" +
@@ -1171,7 +1487,6 @@ function recordActivePBTT() {
         return;
       }
 
-      // Error 3: Locked (Date Passed AND No Bypass)
       if (periodIsLocked) {
         ui.alert(
           `🚫 PERIOD LOCKED\n\n` +
@@ -1182,49 +1497,327 @@ function recordActivePBTT() {
         return;
       }
 
-    } catch (err) { 
-      ui.alert("❌ Validation Connection Error: " + err.message); 
-      return; 
+    } catch (err) {
+      ui.alert("❌ Validation Connection Error: " + err.message);
+      return;
     }
 
     // ===============================================
-    // 3. TAB SPECIFIC VALIDATION
+    // 3. TAB SPECIFIC VALIDATION & EXTERNAL TAB/COLUMN CHECK
     // ===============================================
+    const extValidationFileId = "12OOOzMVeWPb6SKJyNu3tewSPKrbu3s93jJA3SmPNSY4";
+    let extSS;
+    try {
+      extSS = SpreadsheetApp.openById(extValidationFileId);
+    } catch (extErr) {
+      ui.alert("❌ External Validation Error: Cannot access master spreadsheet '12OOOzMVeWPb6SKJyNu3tewSPKrbu3s93jJA3SmPNSY4'.");
+      return;
+    }
+
+    const extSheetsList = extSS.getSheets();
+    const propertyRecordsCache = {};
+
     for (let tabName in tabValidationMaps) {
       let currentSheet = ss.getSheetByName(tabName);
-      if (!currentSheet) continue; 
+      if (!currentSheet) continue;
 
       let lastRow = currentSheet.getLastRow();
       let startRow = 13;
       if (lastRow < startRow) continue;
 
-      // Fetch up to Column AK (37 columns)
-      let dataRange = currentSheet.getRange(startRow, 1, lastRow - startRow + 1, 37).getValues();
-      let displayRange = currentSheet.getRange(startRow, 1, lastRow - startRow + 1, 37).getDisplayValues();
+      let userProperty = String(currentSheet.getRange("E4").getValue() || "").trim();
+      if (!userProperty && instSheet) {
+        userProperty = String(instSheet.getRange("C24").getValue() || "").trim();
+      }
+
+      if (!userProperty) {
+        ui.alert(
+          `🚫 PROPERTY NAME MISSING\n\n` +
+          `Tab: [${tabName}]\n\n` +
+          `Please provide a valid PROPERTY NAME in cell E4 or Instructions C24 before submitting.`
+        );
+        return;
+      }
+
+      const cleanUserProp = superClean(userProperty);
+      const isPropertyBypassed = isBypassedProperty(userProperty);
+
+      let propSheetName = "";
+
+      // Check external file if not bypassed
+      if (!isPropertyBypassed) {
+        let targetPropertySheet = null;
+        for (let s of extSheetsList) {
+          if (isPropertyAndTabMatch(userProperty, s.getName())) {
+            targetPropertySheet = s;
+            break;
+          }
+        }
+
+        if (!targetPropertySheet) {
+          ui.alert(
+            `🚫 INVALID PROPERTY (TAB NOT FOUND)\n\n` +
+            `Property: "${userProperty}"\n` +
+            `Tab in Template: [${tabName}]\n\n` +
+            `No matching Tab Name for "${userProperty}" was found in the master validation file.\n\n` +
+            `Submission is blocked.`
+          );
+          return;
+        }
+
+        propSheetName = targetPropertySheet.getName();
+
+        if (!propertyRecordsCache[propSheetName]) {
+          const extLastRow = targetPropertySheet.getLastRow();
+          if (extLastRow < 3) {
+            ui.alert(
+              `🚫 EMPTY MASTER DIRECTORY\n\n` +
+              `The master sheet for Tab "${propSheetName}" contains no tenant records (Row 3+ is empty).`
+            );
+            return;
+          }
+
+          const extHeaders = targetPropertySheet.getRange(2, 1, 1, targetPropertySheet.getLastColumn()).getValues()[0];
+          let tenantColIdx = -1;
+          let codeColIdx = -1;
+          let propColIdx = -1;
+
+          for (let c = 0; c < extHeaders.length; c++) {
+            const hClean = superClean(extHeaders[c]);
+            if (hClean === "property" || hClean.includes("property")) propColIdx = c;
+            if (hClean === "tenant name" || hClean.includes("tenant name")) tenantColIdx = c;
+            if (hClean === "customer code" || hClean.includes("customer code")) codeColIdx = c;
+          }
+
+          if (tenantColIdx === -1 || codeColIdx === -1) {
+            ui.alert(
+              `🚫 MASTER HEADER CONFIGURATION ERROR\n\n` +
+              `Master Tab: [${propSheetName}]\n\n` +
+              `Could not locate Row 2 headers for 'TENANT NAME' and/or 'CUSTOMER CODE'.\n` +
+              `Please ensure Row 2 contains these exact column names.`
+            );
+            return;
+          }
+
+          const extRawData = targetPropertySheet.getRange(3, 1, extLastRow - 2, targetPropertySheet.getLastColumn()).getValues();
+          const records = [];
+
+          for (let r = 0; r < extRawData.length; r++) {
+            const row = extRawData[r];
+            const tVal = String(row[tenantColIdx] || "").trim();
+            const cVal = String(row[codeColIdx] || "").trim();
+            const pVal = (propColIdx !== -1) ? String(row[propColIdx] || "").trim() : propSheetName;
+            
+            if (tVal || cVal) {
+              records.push({
+                property: pVal,
+                tenantName: tVal,
+                customerCode: cVal
+              });
+            }
+          }
+          propertyRecordsCache[propSheetName] = records;
+        }
+      }
+
+      const matchingPropRecords = propertyRecordsCache[propSheetName] || [];
+
+      // Ensure range spans past Column AL (Column 38)
+      const fetchCols = Math.max(currentSheet.getLastColumn(), 38);
+      const tabHeaders = currentSheet.getRange(CONFIG.headerRow, 1, 1, fetchCols).getValues()[0];
       
-      let requiredCols = tabValidationMaps[tabName];
+      let partnerColIdx = -1;
+      let codeColIdx = -1;
+
+      for (let c = 0; c < tabHeaders.length; c++) {
+        const hClean = superClean(tabHeaders[c]);
+        if (hClean.includes("retail partner") || hClean.includes("tenant name")) partnerColIdx = c;
+        if (hClean.includes("tenant code") || hClean.includes("customer code")) codeColIdx = c;
+      }
+      if (partnerColIdx === -1) partnerColIdx = colToIdx("E");
+
+      let dataRange = currentSheet.getRange(startRow, 1, lastRow - startRow + 1, fetchCols).getValues();
+      let displayRange = currentSheet.getRange(startRow, 1, lastRow - startRow + 1, fetchCols).getDisplayValues();
+
+      const alIdx = colToIdx("AL");
+      const eIdx = colToIdx("E");
 
       for (let i = 0; i < dataRange.length; i++) {
         let rowData = dataRange[i];
-        let valA = String(rowData[0] || "").toLowerCase();
+        let valA = String(rowData[0] || "").toLowerCase().trim();
 
-        // STOP checking if we hit TOTAL row
         if (valA.includes("total") && !valA.includes("sub")) break;
+        if (valA.includes("subtotal") || valA.includes("sub-total") || valA.includes("sub total")) continue;
 
-        let rawValE = rowData[4]; 
-        let valE = (rawValE === undefined || rawValE === null) ? "" : String(rawValE).trim();
-        
-        // If Column E has data, validate the specific required columns
+        // Robust reader: Reads raw data or displayed formula/formatted value
+        const getVal = (colIndex) => {
+          if (colIndex < 0 || colIndex >= rowData.length) return "";
+          const raw = rowData[colIndex];
+          const disp = displayRange[i] ? displayRange[i][colIndex] : "";
+          if (raw !== undefined && raw !== null && String(raw).trim() !== "") return String(raw).trim();
+          if (disp !== undefined && disp !== null && String(disp).trim() !== "") return String(disp).trim();
+          return "";
+        };
+
+        let valE = getVal(partnerColIdx !== -1 ? partnerColIdx : eIdx);
+
         if (valE !== "") {
-          for (let colLetter of requiredCols) {
-            let colIdx = colToIdx(colLetter); // Requires external helper colToIdx
-            let rawCellVal = rowData[colIdx];
-            let cellValue = (rawCellVal === undefined || rawCellVal === null) ? "" : String(rawCellVal).trim();
+          const valAD = String(rowData[colToIdx("AD")] || "").trim();
+          if (valAD.toUpperCase() === "MONITORING") {
+            const rawP = rowData[colToIdx("P")];
+            const isZeroP = (rawP === 0 || String(rawP).trim() === "0" || (!isNaN(rawP) && Number(rawP) === 0 && String(rawP).trim() !== ""));
             
-            // Get visible display value specifically to detect characters like "%" natively formatted
-            let visibleCellVal = (displayRange[i][colIdx] || "").trim();
+            // Block submission if MONITORING is used with a 0 value in Column P
+            if (isZeroP) {
+              ui.alert(
+                `🚫 INVALID ENTRY\n\n` +
+                `Tab: [${tabName}]\n` +
+                `Row: ${i + startRow}\n` +
+                `Column: P / AD\n\n` +
+                `User cannot use "MONITORING" in Remarks if the value in Column P is 0.`
+              );
+              return;
+            }
+            continue;
+          }
 
-            // 1. Existing Checker: Must not be blank
+          // Check if Column J is THEORETICAL
+          const rawValJ = rowData[colToIdx("J")];
+          const valJ = (rawValJ === undefined || rawValJ === null) ? "" : String(rawValJ).trim().toUpperCase();
+          const isRowTheo = (valJ === "THEORETICAL");
+
+          // Dynamically adjust required columns for THEORETICAL
+          let requiredCols = tabValidationMaps[tabName].slice();
+          if (isRowTheo) {
+            // Do not require Column L for Elec, Water, and LPG
+            requiredCols = requiredCols.filter(col => col !== "L");
+
+            if (tabName === "Elec") {
+              // Elec: Column P is required
+              if (!requiredCols.includes("P")) requiredCols.push("P");
+            } else if (tabName === "Water" || tabName === "LPG") {
+              // Water and LPG: Column O is required, do not require L-dependent columns
+              if (!requiredCols.includes("O")) requiredCols.push("O");
+              requiredCols = requiredCols.filter(col => !["P", "S", "T", "U", "V", "W", "X", "M", "N"].includes(col));
+            }
+          }
+
+          // --- EXTERNAL TENANT & CODE CHECK (SKIPPED IF BYPASSED) ---
+          if (!isPropertyBypassed) {
+            const userRetailPartner = valE;
+
+            // Strictly read Tenant Code from Column AL (or dynamic TENANT CODE header)
+            let userTenantCode = getVal(alIdx);
+            if (!userTenantCode && codeColIdx !== -1) {
+              userTenantCode = getVal(codeColIdx);
+            }
+
+            let basePartner = userRetailPartner;
+            if (userRetailPartner.includes('_')) {
+              const parts = userRetailPartner.split('_');
+              if (parts[parts.length - 1].trim().toLowerCase() === "affiliates") {
+                basePartner = parts.slice(0, -1).join('_').trim();
+              }
+            }
+
+            const cleanPartner = superClean(userRetailPartner);
+            const cleanBasePartner = superClean(basePartner);
+            const cleanCode = superClean(userTenantCode);
+
+            const partnerExists = matchingPropRecords.some(rec => {
+              const cRecTenant = superClean(rec.tenantName);
+              return cRecTenant && (cRecTenant === cleanPartner || cRecTenant === cleanBasePartner);
+            });
+
+            if (!partnerExists) {
+              ui.alert(
+                `🚫 INVALID RETAIL PARTNER\n\n` +
+                `Tab: [${tabName}]\n` +
+                `Row: ${i + startRow}\n\n` +
+                `RETAIL PARTNER "${userRetailPartner}" does not exist in master Tab "${propSheetName}" (TENANT NAME).\n\n` +
+                `Submission is blocked.`
+              );
+              return;
+            }
+
+            if (!userTenantCode) {
+              ui.alert(
+                `🚫 MISSING TENANT CODE\n\n` +
+                `Tab: [${tabName}]\n` +
+                `Row: ${i + startRow} (Column AL)\n\n` +
+                `TENANT CODE is blank for "${userRetailPartner}".\n\n` +
+                `Please input the tenant code in Column AL (e.g. MREI028).`
+              );
+              return;
+            }
+
+            const codeExists = matchingPropRecords.some(rec => {
+              const cRecCode = superClean(rec.customerCode);
+              return cRecCode && cRecCode === cleanCode;
+            });
+
+            if (!codeExists) {
+              ui.alert(
+                `🚫 INVALID TENANT CODE\n\n` +
+                `Tab: [${tabName}]\n` +
+                `Row: ${i + startRow}\n\n` +
+                `TENANT CODE "${userTenantCode}" does not exist in master Tab "${propSheetName}" (CUSTOMER CODE).\n\n` +
+                `Submission is blocked.`
+              );
+              return;
+            }
+
+            const pairMatches = matchingPropRecords.some(rec => {
+              const cRecTenant = superClean(rec.tenantName);
+              const cRecCode = superClean(rec.customerCode);
+              const cRecProp = superClean(rec.property);
+              
+              const tMatch = cRecTenant && (cRecTenant === cleanPartner || cRecTenant === cleanBasePartner);
+              const cMatch = cRecCode && cRecCode === cleanCode;
+              
+              // If the master tab has a PROPERTY column, verify it matches the selected Property
+              const pMatch = !rec.property || !cleanUserProp || cRecProp === cleanUserProp || (getSpecialPropertyTabName(userProperty) !== null);
+
+              return tMatch && cMatch && pMatch;
+            });
+
+            if (!pairMatches) {
+              ui.alert(
+                `🚫 TENANT BINDING MISMATCH\n\n` +
+                `Tab: [${tabName}]\n` +
+                `Row: ${i + startRow}\n\n` +
+                `RETAIL PARTNER "${userRetailPartner}" and TENANT CODE "${userTenantCode}" do not correspond to the same row for Property "${userProperty}" in master Tab "${propSheetName}".\n\n` +
+                `Submission is blocked.`
+              );
+              return;
+            }
+          }
+
+          // --- LPG CONVERSION FACTOR CHECK ---
+          if (tabName === "LPG") {
+            const valN10 = Number(currentSheet.getRange("N10").getValue());
+            const valFVal = String(rowData[colToIdx("F")] || "").trim().toUpperCase();
+            const valMVal = Number(rowData[colToIdx("M")]);
+            
+            if (valFVal === "KA" && valMVal !== valN10) {
+              ui.alert(
+                `🚫 INVALID CONVERSION FACTOR\n\n` +
+                `Tab: [LPG]\n` +
+                `Row: ${i + startRow}\n\n` +
+                `Tenant is marked as KA, but the "Conversion Factor CBM to KG" in Column M (${valMVal}) is different from the standard "Conversion Factor" in N10 (${valN10}).\n\n` +
+                `Please change Column F to "KA&SR" to allow a different Conversion Factor.`
+              );
+              return;
+            }
+          }
+
+          for (let colLetter of requiredCols) {
+            let colIdx = colToIdx(colLetter);
+            let rawCellVal = rowData[colIdx];
+            let cellValue = getVal(colIdx);
+            let visibleCellVal = (displayRange[i] && displayRange[i][colIdx] ? displayRange[i][colIdx] : "").trim();
+
+
             if (cellValue === "") {
               ui.alert(
                 `🚫 INCOMPLETE DATA\n\n` +
@@ -1233,62 +1826,83 @@ function recordActivePBTT() {
                 `Column: ${colLetter}\n\n` +
                 `Required field is blank.`
               );
-              return; 
+              return;
             }
 
-            // 2. Checker for Col O: Cannot be 0 (but accepts other valid characters/symbols)
             if (colLetter === "O" && (cellValue === "0" || cellValue === "0.00" || rawCellVal === 0)) {
-               ui.alert(
+              ui.alert(
                 `🚫 INVALID DATA\n\n` +
                 `Tab: [${tabName}]\n` +
                 `Row: ${i + startRow}\n` +
                 `Column: O\n\n` +
-                `Value cannot be exactly 0 (zero) when Column E has data. It can be any other valid character.`
+                `Value cannot be exactly 0 (zero) when Column E has data.`
               );
-              return; 
+              return;
             }
 
-          // 3. New Checker for Col L: Cannot be negative
-                      if (colLetter === "L") {
-                        let numVal = Number(cellValue);
-                        // We check if it's a number and if it's strictly less than 0
-                        if (!isNaN(numVal) && numVal < 0) {
-                          ui.alert(
-                            `🚫 INVALID CONSUMPTION\n\n` +
-                            `Tab: [${tabName}]\n` +
-                            `Row: ${i + startRow}\n` +
-                            `Column: L\n\n` +
-                            `Value (${cellValue}) cannot be a negative number.\n` +
-                            `Please check if the Current Reading is lower than the Previous Reading.`
-                          );
-                          return; // Block submission
-                        }
-                      }
-
-
-            // 4. UPDATED Checker for Col P: 
-            // - ALLOWED completely if it contains "%".
-            // - If NO "%", it MUST be a valid number and CANNOT be exactly 0.
-            if (colLetter === "P") {
-              
-              if (visibleCellVal.includes("%")) {
-                // Allowed blindly: continue seamlessly to next loop iteration
-                continue; 
-              } else {
-                // Since there is no %, strict check to ensure it's a number and not 0
-                let numVal = Number(cellValue); 
-                if (isNaN(numVal) || numVal === 0) {
-                  ui.alert(
-                    `🚫 INVALID ENTRY\n\n` +
-                    `Tab: [${tabName}]\n` +
-                    `Row: ${i + startRow}\n` +
-                    `Column: P\n\n` +
-                    `Make sure the value is not equal to 0 or set as percentage (%)`
-                  );
-                  return;
-                }
+            // 3. Checker for Col L: Cannot be negative (if provided)
+            if (colLetter === "L" && cellValue !== "") {
+              let numVal = Number(cellValue);
+              if (!isNaN(numVal) && numVal < 0) {
+                ui.alert(
+                  `🚫 INVALID CONSUMPTION\n\n` +
+                  `Tab: [${tabName}]\n` +
+                  `Row: ${i + startRow}\n` +
+                  `Column: L\n\n` +
+                  `Value (${cellValue}) cannot be a negative number.\n` +
+                  `Please check if the Current Reading is lower than the Previous Reading.`
+                );
+                return;
               }
+            }
 
+            if (colLetter === "P") {
+              if (visibleCellVal.includes("%")) continue;
+
+              const adIdx = colToIdx("AD");
+              const rawAD = rowData[adIdx];
+              const valAD = (rawAD === undefined || rawAD === null) ? "" : String(rawAD).trim().toLowerCase();
+              
+              const allowedRemarks = [
+                "defective meter",
+                "inaccessible meter",
+                "inaccesible meter",
+                "very minimal usage",
+                "minimal usage"
+              ];
+              const hasAllowedRemark = allowedRemarks.some(kw => valAD.includes(kw));
+
+              let numVal = Number(cellValue);
+              const isZeroValue = (cellValue === "0" || (!isNaN(numVal) && numVal === 0 && cellValue !== ""));
+
+              // Bypass if 0 and Remarks match approved reasons
+              if (isZeroValue && hasAllowedRemark) continue;
+
+              if (isNaN(numVal) || numVal === 0) {
+                ui.alert(
+                  `🚫 INVALID ENTRY\n\n` +
+                  `Tab: [${tabName}]\n` +
+                  `Row: ${i + startRow}\n` +
+                  `Column: P\n\n` +
+                  `Make sure the value is not equal to 0 or set as percentage (%)`
+                );
+                return;
+              }
+            }
+
+            if (colLetter === "F") {
+              const valFCheck = cellValue.toUpperCase();
+              const allowedFValuesSubmit = ["KA", "SR", "REG", "KA&SR"];
+              if (!allowedFValuesSubmit.includes(valFCheck)) {
+                ui.alert(
+                  `🚫 INVALID CATEGORY\n\n` +
+                  `Tab: [${tabName}]\n` +
+                  `Row: ${i + startRow}\n` +
+                  `Column: F\n\n` +
+                  `Value ("${cellValue}") must be exactly "KA", "SR", "REG", or "KA&SR".`
+                );
+                return;
+              }
             }
 
           }
@@ -1297,67 +1911,52 @@ function recordActivePBTT() {
     }
 
     // ===============================================
-    // 4. DATA EXTRACTION AND SUBMISSION (UPDATED)
+    // 4. DATA EXTRACTION AND SUBMISSION
     // ===============================================
-    
-    // Find Header Sheet
     let activeSheet = ss.getActiveSheet();
-    let headerSheet = tabValidationMaps[activeSheet.getName()] ? activeSheet : 
-                      Object.keys(tabValidationMaps).map(n => ss.getSheetByName(n)).find(s => s !== null);
-    
+    let headerSheet = tabValidationMaps[activeSheet.getName()] ? activeSheet :
+      Object.keys(tabValidationMaps).map(n => ss.getSheetByName(n)).find(s => s !== null);
+
     if (!headerSheet) {
       ui.alert("🚫 Error: No utility tabs (Elec, Water, LPG) found.");
       return;
     }
 
-    // Process Headers (Assumes existing helper)
     const extractedData = processSheetHeaders(headerSheet);
     if (!extractedData) return;
 
-    // Connect to DB
     const props = PropertiesService.getScriptProperties();
     let activeDB_ID = props.getProperty("ACTIVE_DB_ID") || masterDbId;
     let db = SpreadsheetApp.openById(activeDB_ID);
     let dSh = db.getSheetByName("PBTT Submission");
 
-    // Prepare Payload
     const timestamp = Utilities.formatDate(new Date(), "Asia/Manila", "MMM d, yyyy hh:mm a");
     const userEmail = Session.getActiveUser().getEmail();
     const activeFileName = ss.getName();
     const ssUrl = ss.getUrl();
 
-    // Final Array [Timestamp, ...Data, File, Url, Email, Ref#]
-    // currentRef is the LAST item in the array.
     const finalRow = [timestamp, ...extractedData, activeFileName, ssUrl, userEmail, currentRef];
 
-    // --- OVERWRITE LOGIC START ---
-    
     const dbData = dSh.getDataRange().getValues();
     let rowIndexToOverwrite = -1;
-    // Assume currentRef is in the last column of the data being submitted
-    const refColumnIndex = finalRow.length - 1; 
+    const refColumnIndex = finalRow.length - 1;
 
-    // Loop through DB to see if REF# already exists (Start at 1 to skip Header)
     for (let r = 1; r < dbData.length; r++) {
       let existingRef = String(dbData[r][refColumnIndex] || "").trim();
-      
-      // Match Found?
       if (existingRef === currentRef) {
-        rowIndexToOverwrite = r + 1; // 0-based array to 1-based row index
+        rowIndexToOverwrite = r + 1;
         break;
       }
     }
 
     if (rowIndexToOverwrite > 0) {
-      // Overwrite existing row
       dSh.getRange(rowIndexToOverwrite, 1, 1, finalRow.length).setValues([finalRow]);
       ui.alert(`✅ SUCCESS: Submission updated (Overwrite existing Ref# ${currentRef}).`);
     } else {
-      // Create new row
       dSh.appendRow(finalRow);
       ui.alert(`✅ SUCCESS: New submission recorded successfully.`);
     }
-    
+
   } catch (x) {
     SpreadsheetApp.getUi().alert("System Error: " + x.message);
   } finally {
@@ -1365,203 +1964,343 @@ function recordActivePBTT() {
   }
 }
 
-// Helper: Column Letter to Index
-function colToIdx(char) {
-    let sum = 0;
-    for (let i = 0; i < char.length; i++) {
-        sum *= 26;
-        sum += char.charCodeAt(i) - 'A'.charCodeAt(0) + 1;
-    }
-    return sum - 1;
-}
+/* =================================
+9. INITIALIZATION & DATA SYNC
+================================= */
+function INITIALIZE_SYSTEM_BUTTON() {
+  if (isMasterFileBlocked()) return;
 
-/**
- * Helper: Column Letter to 0-based Index
- */
-function colToIdx(letter) {
-  let column = 0, length = letter.length;
-  for (let i = 0; i < length; i++) {
-    column += (letter.charCodeAt(i) - 64) * Math.pow(26, length - i - 1);
+  const ui = SpreadsheetApp.getUi();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  
+  ss.toast("🔄 Syncing databases and checking Ref#...", "System Status", 3);
+
+  try {
+    syncDataAcrossFiles();
+    syncKAData();
+    generateUniqueAlphanumericRef();
+  } catch (e) {
+    ui.alert("❌ Error during initialization: " + e.message);
   }
-  return column - 1;
 }
-/**
- * Handles cleaning, concatenating, deduping values, 
- * and checking for correct dates.
- */
+
+function INSTALL_SYSTEM() {
+  if (isMasterFileBlocked()) return;
+
+  const ui = SpreadsheetApp.getUi();
+  
+  try {
+    syncDataAcrossFiles();           
+    syncKAData();
+
+    generateUniqueAlphanumericRef();
+
+    const functionName = 'runStartupSequence';
+    const triggers = ScriptApp.getProjectTriggers();
+    triggers.forEach(t => { 
+      if (t.getHandlerFunction() === functionName) {
+        ScriptApp.deleteTrigger(t); 
+      }
+    });
+
+    ui.alert("🚀 UPDATE COMPLETE\n\n- Tabs 'dvPeriod', 'dvGen', and 'KA_DATA' overwritten.\n- Ref# is secured in cell C7.");
+    
+  } catch (e) {
+    ui.alert("❌ Action Failed: " + e.message);
+  }
+}
+
+function runStartupSequence() {
+  syncDataAcrossFiles();
+  syncKAData(); 
+  generateUniqueAlphanumericRef();
+}
+
+function syncKAData() {
+  const sourceId = "1jY-9FMha3x972o4Gz1d6DVD36d3ppjHW_WM1DHJz6ag";
+  const targetSS = SpreadsheetApp.getActiveSpreadsheet(); 
+
+  const lock = LockService.getScriptLock();
+  try {
+    if (!lock.tryLock(15000)) throw new Error("Database is busy during KA_DATA update."); 
+
+    const sourceSS = SpreadsheetApp.openById(sourceId);
+    const sourceSheet = sourceSS.getSheetByName("Data");
+    if (!sourceSheet) return;
+
+    let targetSheet = targetSS.getSheetByName("KA_DATA");
+    if (!targetSheet) {
+      targetSheet = targetSS.insertSheet("KA_DATA");
+    }
+
+    const sourceRange = sourceSheet.getDataRange();
+    const sourceData = sourceRange.getValues();
+    const sourceFormats = sourceRange.getNumberFormats(); 
+    const numRows = sourceData.length;
+    
+    if (numRows > 0) {
+      const numCols = sourceData[0].length;
+      targetSheet.clear(); 
+      
+      if (targetSheet.getMaxRows() < numRows) {
+        targetSheet.insertRowsAfter(targetSheet.getMaxRows(), numRows - targetSheet.getMaxRows());
+      }
+      if (targetSheet.getMaxColumns() < numCols) {
+        targetSheet.insertColumnsAfter(targetSheet.getMaxColumns(), numCols - targetSheet.getMaxColumns());
+      }
+
+      const targetRange = targetSheet.getRange(1, 1, numRows, numCols);
+      targetRange.setValues(sourceData);
+      targetRange.setNumberFormats(sourceFormats);
+    }
+    SpreadsheetApp.flush();
+  } finally {
+    if (lock.hasLock()) lock.releaseLock();
+  }
+}
+
+function syncDataAcrossFiles() {
+  const sourceId = "1hMMUd4ho50HP63dc2fRAo--iK-m7YotamkKtsDGT_Us";
+  const targetSS = SpreadsheetApp.getActiveSpreadsheet(); 
+  const tabsToSync = ["dvPeriod", "dvGen"]; 
+  const timeZone = Session.getScriptTimeZone();
+
+  const lock = LockService.getScriptLock();
+  try {
+    if (!lock.tryLock(15000)) throw new Error("Database is busy."); 
+
+    const sourceSS = SpreadsheetApp.openById(sourceId);
+
+    tabsToSync.forEach(tabName => {
+      const sourceSheet = sourceSS.getSheetByName(tabName);
+      const targetSheet = targetSS.getSheetByName(tabName);
+
+      if (sourceSheet && targetSheet) {
+        let sourceRange = sourceSheet.getDataRange();
+        let sourceData = sourceRange.getValues();
+        const numRows = sourceData.length;
+        const numCols = sourceData[0].length;
+        
+        if (numRows > 0) {
+          if (numRows > 1) { 
+            for (let i = 1; i < numRows; i++) {
+              if (sourceData[i][0] instanceof Date) sourceData[i][0] = Utilities.formatDate(sourceData[i][0], timeZone, "MMM d, yyyy");
+              if (tabName === "dvPeriod") {
+                if (sourceData[i][1] instanceof Date) sourceData[i][1] = Utilities.formatDate(sourceData[i][1], timeZone, "MMM d, yyyy");
+                if (sourceData[i][2] instanceof Date) sourceData[i][2] = Utilities.formatDate(sourceData[i][2], timeZone, "MMM d, yyyy");
+              }
+            }
+          }
+
+          targetSheet.clear(); 
+          
+          if (targetSheet.getMaxRows() < numRows) targetSheet.insertRowsAfter(targetSheet.getMaxRows(), numRows - targetSheet.getMaxRows());
+          if (targetSheet.getMaxColumns() < numCols) targetSheet.insertColumnsAfter(targetSheet.getMaxColumns(), numCols - targetSheet.getMaxColumns());
+
+          targetSheet.getRange(1, 1, numRows, numCols).setValues(sourceData);
+        }
+      }
+    });
+    SpreadsheetApp.flush();
+  } finally {
+    if (lock.hasLock()) lock.releaseLock();
+  }
+}
+
+function generateUniqueAlphanumericRef() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const instSheet = ss.getSheetByName("Instructions");
+  if (!instSheet) return;
+
+  const cell = instSheet.getRange("C7");
+  const existingRef = cell.getValue().toString().trim();
+  
+  if (existingRef !== "" && existingRef !== null) {
+    console.log("Ref# already exists. Generation skipped to prevent overwrite.");
+    return; 
+  }
+
+  const masterId = "1hMMUd4ho50HP63dc2fRAo--iK-m7YotamkKtsDGT_Us";
+  try {
+    const masterSS = SpreadsheetApp.openById(masterId);
+    const dbSheet = masterSS.getSheetByName("PBTT Submission");
+    const lastRow = dbSheet.getLastRow();
+    
+    let existingRefs = new Set();
+    if (lastRow >= 5) {
+      const data = dbSheet.getRange(5, 11, lastRow - 4, 1).getValues();
+      existingRefs = new Set(data.flat().map(v => String(v).trim()));
+    }
+
+    const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    let newRef = "";
+    let isUnique = false;
+
+    while (!isUnique) {
+      let result = "";
+      for (let i = 0; i < 6; i++) result += chars.charAt(Math.floor(Math.random() * chars.length));
+      newRef = "Ref#" + result;
+      if (!existingRefs.has(newRef)) isUnique = true;
+    }
+    
+    if (cell.getValue().toString().trim() === "") {
+       cell.setValue(newRef);
+    }
+    
+  } catch (e) {
+    console.error("Ref# Gen Error: " + e.toString());
+  }
+}
+
 function processSheetHeaders(sheet) {
+  const sourceFileUrl = sheet.getRange("A1").getValue().toString().trim();
+  const textToCheck = sourceFileUrl.toUpperCase();
 
-   const sourceFileUrl = sheet.getRange("A1").getValue().toString().trim();
-    const textToCheck = sourceFileUrl.toUpperCase(); // Used to easily check N/A or NA regardless of capitalization
+  if (
+    sourceFileUrl === "" ||
+    !(sourceFileUrl.toLowerCase().includes("http") || textToCheck === "N/A" || textToCheck === "NA")
+  ) {
+    SpreadsheetApp.getUi().alert(
+      "🚫 SUBMISSION BLOCKED\n\n" +
+      "A valid SOURCE FILE URL is missing in cell C20 in Instruction Tab or A1 in Utilities Tab.\n" +
+      "Please provide a valid URL, or enter 'N/A' | 'NA' before submitting."
+    );
+    return null;
+  }
 
-    // Block IF: it is completely empty OR it does NOT contain 'http' AND is NOT 'N/A' AND is NOT 'NA'
-    if (
-        sourceFileUrl === "" || 
-        !(sourceFileUrl.toLowerCase().includes("http") || textToCheck === "N/A" || textToCheck === "NA")
-    ) {
-        SpreadsheetApp.getUi().alert(
-            "🚫 SUBMISSION BLOCKED\n\n" +
-            "A valid SOURCE FILE URL is missing in cell C20 in Instruction Tab or A1 in Utilities Tab.\n" +
-            "Please provide a valid URL, or enter 'N/A' | 'NA' before submitting."
-        );
-        return null; // Stop the process completely
-    }
+  const config = [
+    { cell: "E4", label: "PROPERTY NAME", type: "text" },
+    { cell: "E6", label: "BILLER/PAYEE COMPANY:", type: "text" },
+    { cell: "E5", label: "LOCATION", type: "text", sourceRange: "B13:B" },
+    { cell: "E11", label: "PROVIDER & ACCOUNT NO:", type: "text", sourceRange: "Y13:Y" },
+    { cell: "E7", label: "START DATE", type: "date" },
+    { cell: "E8", label: "END DATE", type: "date" },
+  ];
 
-    
-    const config = [
-        
-        { cell: "E4", label: "PROPERTY NAME", type: "text" },
-        { cell: "E6", label: "BILLER/PAYEE COMPANY:", type: "text" },
-        { cell: "E5", label: "LOCATION", type: "text", sourceRange: "B13:B" },
-        { cell: "E11", label: "PROVIDER & ACCOUNT NO:", type: "text", sourceRange: "Y13:Y" },
-        { cell: "E7", label: "START DATE", type: "date" },
-        { cell: "E8", label: "END DATE", type: "date" },
-    ];
+  const results = [];
+  const missing = [];
 
-    const results = [];
-    const missing = [];
+  const startDateValue = sheet.getRange("E7").getValue();
+  const endDateValue = sheet.getRange("E8").getValue();
 
-    // --- 1. DATE VALIDATION ---
-    const startDateValue = sheet.getRange("E7").getValue();
-    const endDateValue = sheet.getRange("E8").getValue();
+  if (!(startDateValue instanceof Date) || isNaN(startDateValue) ||
+    !(endDateValue instanceof Date) || isNaN(endDateValue)) {
+    SpreadsheetApp.getUi().alert("❌ ERROR: Start Date or End Date is empty or invalid.");
+    return null;
+  }
 
-    if (!(startDateValue instanceof Date) || isNaN(startDateValue) || 
-        !(endDateValue instanceof Date) || isNaN(endDateValue)) {
-        SpreadsheetApp.getUi().alert("❌ ERROR: Start Date or End Date is empty or invalid.");
-        return null;
-    }
+  const startDate = new Date(startDateValue);
+  const endDate = new Date(endDateValue);
+  const today = new Date();
 
-    const startDate = new Date(startDateValue);
-    const endDate = new Date(endDateValue);
-    const today = new Date();
+  if (endDate <= startDate) {
+    SpreadsheetApp.getUi().alert("❌ DATE ERROR: End Date (E8) must be after Start Date (E7).");
+    return null;
+  }
 
-    if (endDate <= startDate) {
-        SpreadsheetApp.getUi().alert("❌ DATE ERROR: End Date (E8) must be after Start Date (E7).");
-        return null;
-    }
+  const currentMonth = today.getMonth();
+  const currentYear = today.getFullYear();
+  const endMonth = endDate.getMonth();
+  const endYear = endDate.getFullYear();
 
-    // --- MONTH-MATCH WARNING ---
-    const currentMonth = today.getMonth(); 
-    const currentYear = today.getFullYear();
-    const endMonth = endDate.getMonth();
-    const endYear = endDate.getFullYear();
+  if (currentMonth !== endMonth || currentYear !== endYear) {
+    const formattedEnd = Utilities.formatDate(endDate, "GMT+8", "MMMM yyyy");
+    const ui = SpreadsheetApp.getUi();
+    const response = ui.alert(
+      "⚠️ CHECK DATE PERIOD",
+      `The End Date is currently set to: ${formattedEnd}.\n\n` +
+      `Note: This does NOT match today's month.\n` +
+      `Is this period correct for your submission?`,
+      ui.ButtonSet.YES_NO
+    );
+    if (response !== ui.Button.YES) return null;
+  }
 
-    if (currentMonth !== endMonth || currentYear !== endYear) {
-        const formattedEnd = Utilities.formatDate(endDate, "GMT+8", "MMMM yyyy");
-        const ui = SpreadsheetApp.getUi();
-        const response = ui.alert(
-            "⚠️ CHECK DATE PERIOD",
-            `The End Date is currently set to: ${formattedEnd}.\n\n` +
-            `Note: This does NOT match today's month.\n` +
-            `Is this period correct for your submission?`,
-            ui.ButtonSet.YES_NO
-        );
-        if (response !== ui.Button.YES) return null; 
-    }
+  for (let item of config) {
+    let finalVal = null;
 
-    // --- 2. HEADER DATA EXTRACTION ---
-    for (let item of config) {
-        let finalVal = null;
-        
-        if (item.cell === "E11") {
-            // ========================================================
-            // SPAN ALL 3 TABS FOR: Provider & Account No (E11 + Y13:Y)
-            // ========================================================
-            let rawItems = [];
-            const tabsToCheck = ["Elec", "Water", "LPG"];
-            const ss = sheet.getParent();
-            
-            tabsToCheck.forEach(tabName => {
-                let utilSheet = ss.getSheetByName(tabName);
-                if (!utilSheet) return; // Skip if tab is missing
-                
-                // 1. Grab E11 from this tab
-                let e11Val = utilSheet.getRange("E11").getValue();
-                if (e11Val) {
-                    e11Val.toString().split(",").forEach(v => rawItems.push(v.trim()));
-                }
-                
-                // 2. Grab Y13:Y from this tab (Stop at "TOTAL" row)
-                let lastR = utilSheet.getLastRow();
-                if (lastR >= 13) {
-                    let colA = utilSheet.getRange("A13:A" + lastR).getValues().flat();
-                    let colY = utilSheet.getRange("Y13:Y" + lastR).getValues().flat();
-                    
-                    for (let i = 0; i < colA.length; i++) {
-                        let aVal = colA[i] ? colA[i].toString().trim().toUpperCase() : "";
-                        if (aVal.includes("TOTAL") && !aVal.includes("SUB")) break; 
-                        
-                        let yVal = colY[i];
-                        if (yVal && yVal.toString().trim() !== "") {
-                            yVal.toString().split(",").forEach(v => rawItems.push(v.trim()));
-                        }
-                    }
-                }
-            });
-            // Clean & Deduplicate collected Accounts
-            let uniqueItems = Array.from(new Set(rawItems)).filter(Boolean);
-            finalVal = uniqueItems.join(", ");
-            
-        } 
-        else if (item.sourceRange) {
-            // ========================================================
-            // NORMAL ARRAY LOOP: Just the current Active Tab (e.g. Location B13:B)
-            // ========================================================
-            let rawItems = [];
-            let mainVal = sheet.getRange(item.cell).getValue();
-            
-            if (mainVal) {
-                mainVal.toString().split(",").forEach(v => rawItems.push(v.trim()));
-            }
+    if (item.cell === "E11") {
+      let rawItems = [];
+      const tabsToCheck = ["Elec", "Water", "LPG"];
+      const ss = sheet.getParent();
 
-            let colLetter = item.sourceRange.substring(0, 1); 
-            let lastR = sheet.getLastRow();
-            if (lastR >= 13) {
-                let colA = sheet.getRange("A13:A" + lastR).getValues().flat();
-                let colSource = sheet.getRange(colLetter + "13:" + colLetter + lastR).getValues().flat();
-                
-                for (let i = 0; i < colA.length; i++) {
-                    let aVal = colA[i] ? colA[i].toString().trim().toUpperCase() : "";
-                    if (aVal.includes("TOTAL") && !aVal.includes("SUB")) break;
+      tabsToCheck.forEach(tabName => {
+        let utilSheet = ss.getSheetByName(tabName);
+        if (!utilSheet) return;
 
-                    let sVal = colSource[i];
-                    if (sVal && sVal.toString().trim() !== "") {
-                        sVal.toString().split(",").forEach(v => rawItems.push(v.trim()));
-                    }
-                }
-            }
-            let uniqueItems = Array.from(new Set(rawItems)).filter(Boolean);
-            finalVal = uniqueItems.join(", ");
-        } 
-        else {
-            // ========================================================
-            // BASIC SINGLE CELLS: Property Name, Dates, Payee, etc.
-            // ========================================================
-            finalVal = sheet.getRange(item.cell).getValue();
-            if (item.type === "date" && finalVal) {
-                finalVal = Utilities.formatDate(new Date(finalVal), Session.getScriptTimeZone(), "MMM d, yyyy");
-            }
+        let e11Val = utilSheet.getRange("E11").getValue();
+        if (e11Val) {
+          e11Val.toString().split(",").forEach(v => rawItems.push(v.trim()));
         }
 
-        // --- Verify if empty (Treat '0' as valid text/number) ---
-        if ((finalVal === "" || finalVal === undefined || finalVal === null) && finalVal !== 0) {
-            missing.push(item.label);
+        let lastR = utilSheet.getLastRow();
+        if (lastR >= 13) {
+          let colA = utilSheet.getRange("A13:A" + lastR).getValues().flat();
+          let colY = utilSheet.getRange("Y13:Y" + lastR).getValues().flat();
+
+          for (let i = 0; i < colA.length; i++) {
+            let aVal = colA[i] ? colA[i].toString().trim().toUpperCase() : "";
+            if (aVal.includes("TOTAL") && !aVal.includes("SUB")) break;
+
+            let yVal = colY[i];
+            if (yVal && yVal.toString().trim() !== "") {
+              yVal.toString().split(",").forEach(v => rawItems.push(v.trim()));
+            }
+          }
         }
+      });
+      let uniqueItems = Array.from(new Set(rawItems)).filter(Boolean);
+      finalVal = uniqueItems.join(", ");
+    }
+    else if (item.sourceRange) {
+      let rawItems = [];
+      let mainVal = sheet.getRange(item.cell).getValue();
 
-        results.push(finalVal);
+      if (mainVal) {
+        mainVal.toString().split(",").forEach(v => rawItems.push(v.trim()));
+      }
+
+      let colLetter = item.sourceRange.substring(0, 1);
+      let lastR = sheet.getLastRow();
+      if (lastR >= 13) {
+        let colA = sheet.getRange("A13:A" + lastR).getValues().flat();
+        let colSource = sheet.getRange(colLetter + "13:" + colLetter + lastR).getValues().flat();
+
+        for (let i = 0; i < colA.length; i++) {
+          let aVal = colA[i] ? colA[i].toString().trim().toUpperCase() : "";
+          if (aVal.includes("TOTAL") && !aVal.includes("SUB")) break;
+
+          let sVal = colSource[i];
+          if (sVal && sVal.toString().trim() !== "") {
+            sVal.toString().split(",").forEach(v => rawItems.push(v.trim()));
+          }
+        }
+      }
+      let uniqueItems = Array.from(new Set(rawItems)).filter(Boolean);
+      finalVal = uniqueItems.join(", ");
+    }
+    else {
+      finalVal = sheet.getRange(item.cell).getValue();
+      if (item.type === "date" && finalVal) {
+        finalVal = Utilities.formatDate(new Date(finalVal), Session.getScriptTimeZone(), "MMM d, yyyy");
+      }
     }
 
-    // Reject Submission if Required Header data is missing
-    if (missing.length > 0) {
-        SpreadsheetApp.getUi().alert("🚫 MISSING HEADER INFO:\n\n" + missing.join("\n"));
-        return null;
+    if ((finalVal === "" || finalVal === undefined || finalVal === null) && finalVal !== 0) {
+      missing.push(item.label);
     }
-    
-    return results;
+
+    results.push(finalVal);
+  }
+
+  if (missing.length > 0) {
+    SpreadsheetApp.getUi().alert("🚫 MISSING HEADER INFO:\n\n" + missing.join("\n"));
+    return null;
+  }
+
+  return results;
 }
-/**
- * Calculates total cell count (Max Rows * Max Cols) across all tabs in a file.
- */
+
 function getTotalCellCount(ss) {
   let total = 0;
   const sheets = ss.getSheets();
@@ -1571,66 +2310,48 @@ function getTotalCellCount(ss) {
   return total;
 }
 
-
-/**
- * NEW LOGIC: When database is full, create a new one.
- * It will ALWAYS pull the header from the original MASTER FILE Row 4
- * and place it into Row 4 of the new file.
- */
 function rotateToNewDatabase(oldDb, oldSheet) {
   const folder = DriveApp.getFolderById(BACKUP_FOLDER_ID);
   const time = Utilities.formatDate(new Date(), "GMT+8", "yyyy-MM-dd_HHmmss");
   const newName = "PBTT_Submission_Database_" + time;
 
-  // 1. Create the new spreadsheet file
   const newFile = SpreadsheetApp.create(newName);
   const newFileId = newFile.getId();
-  
-  // 2. Move to the backup folder
+
   const driveFile = DriveApp.getFileById(newFileId);
   folder.addFile(driveFile);
   DriveApp.getRootFolder().removeFile(driveFile);
 
-  // 3. Set up the new sheet
   const targetSheetName = "PBTT Submission";
   const newSheet = newFile.insertSheet(targetSheetName);
 
-  // --- HARDCODED MASTER HEADER FETCH ---
-  // We use PBTT_DB_ID (your master) to ensure we always get the Row 4 labels
   try {
     const masterSS = SpreadsheetApp.openById(PBTT_DB_ID);
     const masterSheet = masterSS.getSheetByName(targetSheetName);
-    
-    // We assume the header is roughly 15 columns wide (A to O) 
-    // based on your recordActivePBTT data extraction
+
     const headerWidth = Math.max(masterSheet.getLastColumn(), 15);
     const masterHeaderRange = masterSheet.getRange(4, 1, 1, headerWidth);
     const targetRange = newSheet.getRange(4, 1, 1, headerWidth);
-    
-    // Copy Values from Master Row 4
+
     const headerValues = masterHeaderRange.getValues();
     targetRange.setValues(headerValues);
-    
-    // Copy Styles (Backgrounds, Bold, etc.) from Master Row 4
+
     targetRange.setBackgrounds(masterHeaderRange.getBackgrounds());
     targetRange.setFontColors(masterHeaderRange.getFontColors());
     targetRange.setFontWeights(masterHeaderRange.getFontWeights());
     targetRange.setHorizontalAlignments(masterHeaderRange.getHorizontalAlignments());
-    
+
     console.log("Successfully copied Row 4 header from Master ID to Row 4 of new file.");
   } catch (e) {
     console.error("Could not fetch master header: " + e.message);
-    // Fallback: If Master is unreachable, we try to grab it from the full sheet (oldSheet)
     const fallbackWidth = oldSheet.getLastColumn() || 15;
     const vals = oldSheet.getRange(4, 1, 1, fallbackWidth).getValues();
     newSheet.getRange(4, 1, 1, fallbackWidth).setValues(vals);
   }
 
-  // Delete the blank "Sheet1" that comes with every new spreadsheet
   const defaultSheet = newFile.getSheetByName("Sheet1");
   if (defaultSheet) newFile.deleteSheet(defaultSheet);
 
-  // 4. Update the Registry file
   try {
     const regSs = SpreadsheetApp.openById(BACKUP_REGISTRY_ID);
     const regSh = regSs.getSheetByName("Backup Files") || regSs.insertSheet("Backup Files");
@@ -1639,29 +2360,29 @@ function rotateToNewDatabase(oldDb, oldSheet) {
     console.warn("Registry update failed, but file was rotated.");
   }
 
-  // 5. Update Script Properties so future submissions go to the NEW file
   PropertiesService.getScriptProperties().setProperty("ACTIVE_DB_ID", newFileId);
-
   return newFileId;
 }
-/**
- * Run this to reset the database submission.
- */
+
 function fullResetDatabasePointer() {
+  if (isMasterFileBlocked()) return;
+
   const props = PropertiesService.getScriptProperties();
-  props.deleteProperty("ACTIVE_DB_ID"); // Removes the link to the deleted/new file
+  props.deleteProperty("ACTIVE_DB_ID");
   SpreadsheetApp.getUi().alert("Reset successful. The script is now looking at the original MASTER file again.");
 }
 
 function checkCurrentDbSize() {
+  if (isMasterFileBlocked()) return;
+
   const props = PropertiesService.getScriptProperties();
   const activeDB_ID = props.getProperty("ACTIVE_DB_ID") || PBTT_DB_ID;
   const db = SpreadsheetApp.openById(activeDB_ID);
-  
+
   const count = getTotalCellCount(db);
   const formattedCount = count.toLocaleString();
   const percent = ((count / 10000000) * 100).toFixed(2);
-  
+
   SpreadsheetApp.getUi().alert(
     `Database Stats:\n\n` +
     `File: ${db.getName()}\n` +
@@ -1670,6 +2391,25 @@ function checkCurrentDbSize() {
   );
 }
 
+/**
+ * Fetches the master validation spreadsheet and its property Tab Names.
+ * File ID: 12OOOzMVeWPb6SKJyNu3tewSPKrbu3s93jJA3SmPNSY4
+ */
+function getExternalValidationData() {
+  const extId = "12OOOzMVeWPb6SKJyNu3tewSPKrbu3s93jJA3SmPNSY4";
+  try {
+    const ss = SpreadsheetApp.openById(extId);
+    const sheets = ss.getSheets();
+    const propertyTabs = sheets.map(s => s.getName());
+    return { ss, propertyTabs, cache: {} };
+  } catch (e) {
+    console.error("Failed to fetch external validation data: " + e.message);
+    return null;
+  }
+}
+
+
+
 
 
 /**
@@ -1677,6 +2417,8 @@ function checkCurrentDbSize() {
  * For manual syncing and checking Ref#.
  */
 function INITIALIZE_SYSTEM_BUTTON() {
+  if (isMasterFileBlocked()) return;
+
   const ui = SpreadsheetApp.getUi();
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   
@@ -1697,6 +2439,8 @@ function INITIALIZE_SYSTEM_BUTTON() {
  * This performs the one-time setup and immediate data sync.
  */
 function INSTALL_SYSTEM() {
+  if (isMasterFileBlocked()) return;
+
   const ui = SpreadsheetApp.getUi();
   
   try {
@@ -1723,7 +2467,6 @@ function INSTALL_SYSTEM() {
     ui.alert("❌ Action Failed: " + e.message);
   }
 }
-
 /**
  * STARTUP SEQUENCE
  */
